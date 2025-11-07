@@ -1,85 +1,98 @@
 import os
 import streamlit as st
-from dotenv import load_dotenv
 import tempfile
 import shutil
-from pathlib import Path
-import requests
+from dotenv import load_dotenv
 
-# ========== 🔧 Carregar variáveis de ambiente ==========
+# ======== 🔧 Configuração ========
 load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-# ========== 🧠 IA com fallback ==========
+# ======== 🧠 Função IA com fallback ========
 def extract_text_with_ai(file_path):
     """
-    Extrai texto de PDF usando IA com fallback automático:
-      1️⃣ Google Gemini
-      2️⃣ OpenAI (ChatGPT)
-      3️⃣ DeepSeek
+    Lê o PDF com IA — tenta Google Gemini, depois OpenAI, depois DeepSeek.
     """
-    # --- 1️⃣ Tenta Google Gemini ---
-    if GOOGLE_API_KEY:
-        try:
+    # ======== 1️⃣ Google Gemini ========
+    try:
+        if GOOGLE_API_KEY:
             import google.generativeai as genai
             genai.configure(api_key=GOOGLE_API_KEY)
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            prompt = f"Extraia o texto completo e os principais dados do PDF: {file_path}"
-            response = model.generate_content(prompt)
-            if response.text:
-                return response.text
-        except Exception as e:
-            st.warning(f"⚠️ Falha no Google Gemini: {e}")
 
-    # --- 2️⃣ Tenta OpenAI ---
-    if OPENAI_API_KEY:
-        try:
+            # Faz upload do PDF real
+            uploaded_file = genai.upload_file(file_path)
+            model = genai.GenerativeModel("gemini-1.5-flash-latest")
+
+            prompt = (
+                "Extraia todas as informações relevantes da nota fiscal (CNPJ, Razão Social, "
+                "Número da Nota, Data, Valor Total e Itens). Resuma de forma estruturada."
+            )
+
+            response = model.generate_content([prompt, uploaded_file])
+            return response.text.strip()
+
+    except Exception as e:
+        st.warning(f"⚠️ Falha no Google Gemini: {e}")
+
+    # ======== 2️⃣ OpenAI GPT-4o ========
+    try:
+        if OPENAI_API_KEY:
             from openai import OpenAI
             client = OpenAI(api_key=OPENAI_API_KEY)
+
+            with open(file_path, "rb") as f:
+                pdf_bytes = f.read()
+
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "Você é um assistente que extrai texto e dados de PDFs."},
-                    {"role": "user", "content": f"Extraia o texto e as informações principais do arquivo {file_path}."}
-                ]
+                    {"role": "system", "content": "Você é um assistente que extrai dados de notas fiscais em PDF."},
+                    {"role": "user", "content": "Extraia os dados principais do seguinte arquivo PDF."},
+                ],
+                files=[{"name": os.path.basename(file_path), "content": pdf_bytes}]
             )
-            return response.choices[0].message.content
-        except Exception as e:
-            st.warning(f"⚠️ Falha no OpenAI: {e}")
+            return response.choices[0].message.content.strip()
 
-    # --- 3️⃣ Tenta DeepSeek ---
-    if DEEPSEEK_API_KEY:
-        try:
-            url = "https://api.deepseek.com/chat/completions"
+    except Exception as e:
+        st.warning(f"⚠️ Falha no OpenAI: {e}")
+
+    # ======== 3️⃣ DeepSeek ========
+    try:
+        if DEEPSEEK_API_KEY:
+            import requests
+
+            with open(file_path, "rb") as f:
+                pdf_bytes = f.read()
+
             headers = {
                 "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/pdf"
             }
-            payload = {
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": "Você é um assistente que lê PDFs e extrai informações relevantes."},
-                    {"role": "user", "content": f"Extraia o texto e as informações do arquivo {file_path}."}
-                ]
-            }
-            response = requests.post(url, headers=headers, json=payload)
-            data = response.json()
-            if "choices" in data and data["choices"]:
-                return data["choices"][0]["message"]["content"]
-        except Exception as e:
-            st.warning(f"⚠️ Falha no DeepSeek: {e}")
 
-    # --- Nenhum serviço funcionou ---
-    return "❌ Nenhum serviço de IA pôde processar o arquivo."
+            response = requests.post(
+                "https://api.deepseek.com/v1/parse-pdf",
+                headers=headers,
+                data=pdf_bytes
+            )
+
+            if response.status_code == 200:
+                return response.text.strip()
+            else:
+                raise Exception(f"Erro DeepSeek: {response.status_code} {response.text}")
+
+    except Exception as e:
+        st.warning(f"⚠️ Falha no DeepSeek: {e}")
+
+    return "❌ Nenhum modelo conseguiu processar o PDF."
 
 
-# ========== 🖥️ Interface Streamlit ==========
-st.set_page_config(page_title="Automatizador de Notas com IA", layout="wide")
-st.title("📄 Automatizador de Notas com IA (Google + OpenAI + DeepSeek)")
-st.write("Envie seus PDFs de notas fiscais e extraia automaticamente as informações usando IA com fallback inteligente.")
+# ======== 💻 Interface ========
+st.set_page_config(page_title="Automatizador de Notas", layout="wide")
+st.title("📄 Automatizador de Notas com IA")
+st.write("Envie PDFs de notas fiscais e deixe a IA extrair automaticamente as informações.")
 
 uploaded_files = st.file_uploader("Selecione os arquivos PDF", accept_multiple_files=True, type=["pdf"])
 
@@ -87,8 +100,8 @@ if uploaded_files:
     st.info(f"{len(uploaded_files)} arquivo(s) enviado(s).")
 
     temp_dir = tempfile.mkdtemp()
-    st.session_state["temp_dir"] = temp_dir
     results = []
+
     progress = st.progress(0)
     total = len(uploaded_files)
 
@@ -98,21 +111,21 @@ if uploaded_files:
             f.write(uploaded_file.getbuffer())
 
         with st.spinner(f"🔍 Processando {uploaded_file.name}..."):
-            extracted_text = extract_text_with_ai(file_path)
-            results.append({"arquivo": uploaded_file.name, "conteudo": extracted_text})
+            result = extract_text_with_ai(file_path)
+            results.append({"arquivo": uploaded_file.name, "conteudo": result})
 
         progress.progress(i / total)
 
     st.success("✅ Processamento concluído!")
 
-    # Mostrar resultados com IDs únicos
-    for idx, r in enumerate(results):
-        st.subheader(r["arquivo"])
-        st.text_area("Resultado", r["conteudo"], height=200, key=f"resultado_{idx}")
+    for r in results:
+        st.subheader(f"📄 {r['arquivo']}")
+        st.text_area(f"Resultado_{r['arquivo']}", r["conteudo"], height=250, key=r["arquivo"])
 
     shutil.rmtree(temp_dir, ignore_errors=True)
+
 else:
     st.info("Envie seus PDFs para começar.")
 
 st.markdown("---")
-st.markdown("**Desenvolvido por João Henrique** 🚀 | IA com fallback: Google → OpenAI → DeepSeek")
+st.markdown("**Desenvolvido por João Henrique 🚀** — Suporte a Google Gemini, OpenAI e DeepSeek")
