@@ -18,15 +18,13 @@ def extract_text_with_ai(file_path):
     Se o Google falhar, tenta OpenAI como fallback.
     """
     try:
-        if GOOGLE_API_KEY:
-            from google import genai
-            client = genai.Client(api_key=GOOGLE_API_KEY)
-            response = client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=f"Extraia o texto completo e os dados principais do PDF: {file_path}"
-            )
-            return response.text
+        import google.generativeai as genai
 
+    genai.configure(api_key=GOOGLE_API_KEY)
+    response = genai.GenerativeModel("gemini-1.5-flash").generate_content(
+    f"Extraia o texto completo e os dados principais do PDF: {file_path}"
+)
+    return response.text
         elif OPENAI_API_KEY:
             from openai import OpenAI
             client = OpenAI(api_key=OPENAI_API_KEY)
