@@ -3,20 +3,19 @@ import streamlit as st
 from dotenv import load_dotenv
 import tempfile
 import shutil
+from pathlib import Path
 
 # ======== 🔧 Carregar variáveis de ambiente (.env local ou nuvem) ========
-load_dotenv()  # Se existir um .env local, ele será carregado
+load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ======== 🧩 IA — fallback entre Google e OpenAI ========
-from pathlib import Path
-
 def extract_text_with_ai(file_path):
     """
     Extrai texto de PDF usando IA.
-    Se o Google falhar, tenta OpenAI/DeepSeek como fallback.
+    Se o Google falhar, tenta OpenAI como fallback.
     """
     try:
         if GOOGLE_API_KEY:
@@ -82,12 +81,20 @@ if uploaded_files:
     st.success("✅ Processamento concluído!")
 
     # Mostrar resultados
-    for r in results:
+    for idx, r in enumerate(results):
         st.subheader(r["arquivo"])
-        st.text_area("Resultado", r["conteudo"], height=200)
+        st.text_area(
+            f"Resultado ({r['arquivo']})",  # rótulo único
+            r["conteudo"],
+            height=200,
+            key=f"resultado_{idx}"  # key único para evitar conflito
+        )
 
     # Limpar temp_dir ao sair
-    shutil.rmtree(temp_dir, ignore_errors=True)
+    try:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    except Exception:
+        pass
 
 else:
     st.info("Envie seus PDFs para começar.")
