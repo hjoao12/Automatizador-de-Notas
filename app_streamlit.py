@@ -26,7 +26,7 @@ def extract_text_with_ai(file_path):
         try:
             import google.generativeai as genai
             genai.configure(api_key=GOOGLE_API_KEY)
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-2.5-flash")
             prompt = f"Extraia o texto completo e os principais dados do PDF: {file_path}"
             response = model.generate_content(prompt)
             if response.text:
