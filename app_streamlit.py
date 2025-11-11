@@ -258,7 +258,7 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
     st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
-    st.experimental_rerun()  # recarrega para mostrar a área de gerenciamento
+    st.rerun()  # recarrega para mostrar a área de gerenciamento
 
 # =====================================================================
 # GERENCIAMENTO (drag & drop com streamlit-sortables ou fallback)
