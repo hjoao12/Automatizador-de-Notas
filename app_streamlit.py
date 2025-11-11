@@ -221,55 +221,87 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
     st.session_state["session_folder"] = str(session_folder)
     st.success("✅ Processamento concluído! Você pode renomear, excluir ou agrupar antes de baixar.")
 
-# ------------------ RENOMEAR / EXCLUIR / AGRUPAR ------------------
+from streamlit_sortables import sort_items  # precisa instalar: pip install streamlit-sortables
+
+# ------------------ GERENCIAMENTO DE NOTAS ------------------
 if "resultados" in st.session_state:
     st.subheader("🗂️ Gerenciamento das Notas")
     resultados = st.session_state["resultados"]
     session_folder = Path(st.session_state["session_folder"])
 
-    novos_nomes = {}
-    notas_mantidas = []
+    # Inicializa grupos na sessão
+    if "grupos" not in st.session_state:
+        st.session_state["grupos"] = {"Sem Grupo": [r["novo"] for r in resultados]}
 
+    grupos = st.session_state["grupos"]
+
+    st.markdown("💡 **Arraste as notas entre os grupos abaixo** para agrupar manualmente. Você também pode criar ou excluir grupos.")
+
+    # Criar ou remover grupos manualmente
+    with st.expander("➕ Gerenciar grupos"):
+        new_group = st.text_input("Nome do novo grupo (sem espaços):")
+        if st.button("Criar grupo") and new_group and new_group not in grupos:
+            grupos[new_group] = []
+            st.success(f"Grupo `{new_group}` criado!")
+
+        del_group = st.selectbox("Excluir grupo existente:", [g for g in grupos if g != "Sem Grupo"])
+        if st.button("Excluir grupo") and del_group in grupos:
+            # move PDFs de volta para 'Sem Grupo'
+            grupos["Sem Grupo"].extend(grupos.pop(del_group))
+            st.warning(f"Grupo `{del_group}` removido.")
+
+    # Mostrar listas arrastáveis (drag and drop)
+    st.markdown("### 📄 Notas agrupadas")
+    cols = st.columns(len(grupos))
+    updated_groups = {}
+
+    for i, (nome_grupo, arquivos) in enumerate(grupos.items()):
+        with cols[i]:
+            st.write(f"📁 **{nome_grupo}** ({len(arquivos)} notas)")
+            items = [f"📄 {a}" for a in arquivos]
+            new_order = sort_items(items, key=f"sortable_{nome_grupo}", direction="vertical", multi_containers=True)
+            # Converte de volta para nomes dos arquivos
+            updated_groups[nome_grupo] = [a.replace("📄 ", "") for a in new_order]
+
+    # Atualiza os grupos com o novo estado
+    st.session_state["grupos"] = updated_groups
+
+    # Opção para editar nomes individuais ou remover
+    st.markdown("### ✏️ Renomear / Excluir notas")
+    novos_nomes = {}
     for res in resultados:
         col1, col2, col3 = st.columns([3, 3, 1])
         with col1:
             novo_nome = st.text_input(f"{res['emitente']} (DOC {res['numero']})", res['novo'])
         with col2:
-            grupo = st.text_input(f"Agrupar com (opcional)", key=f"grupo_{res['novo']}", placeholder="ex: GRUPO1")
-        with col3:
             manter = st.checkbox("✅ Incluir", key=f"keep_{res['novo']}", value=True)
+        with col3:
+            grupo_atual = next((g for g, arqs in grupos.items() if res['novo'] in arqs), "Sem Grupo")
+            st.text(grupo_atual)
 
         if manter:
-            notas_mantidas.append(res)
-            novos_nomes[res['novo']] = {"nome": novo_nome, "grupo": grupo.strip() if grupo else None}
+            novos_nomes[res['novo']] = novo_nome
 
+    # Gerar ZIP final
     if st.button("📦 Gerar ZIP Final"):
         memory_zip = io.BytesIO()
         with zipfile.ZipFile(memory_zip, "w") as zf:
-            grupos = {}
-
-            for f in notas_mantidas:
-                meta = novos_nomes.get(f["novo"], {})
-                nome_final = meta.get("nome", f["novo"])
-                grupo = meta.get("grupo")
-
-                if grupo:
-                    grupos.setdefault(grupo, []).append(f)
+            for grupo, arquivos in grupos.items():
+                if grupo == "Sem Grupo":
+                    for nome in arquivos:
+                        nome_final = novos_nomes.get(nome, nome)
+                        zf.write(session_folder / nome, arcname=nome_final)
                 else:
-                    zf.write(session_folder / f["novo"], arcname=nome_final)
-
-            # Agrupar PDFs manualmente
-            for grupo, itens in grupos.items():
-                writer = PdfWriter()
-                for item in itens:
-                    r = PdfReader(session_folder / item["novo"])
-                    for p in r.pages:
-                        writer.add_page(p)
-                nome_agrupado = f"{grupo}.pdf"
-                temp_path = session_folder / nome_agrupado
-                with open(temp_path, "wb") as f_out:
-                    writer.write(f_out)
-                zf.write(temp_path, arcname=nome_agrupado)
+                    writer = PdfWriter()
+                    for nome in arquivos:
+                        r = PdfReader(session_folder / nome)
+                        for p in r.pages:
+                            writer.add_page(p)
+                    nome_agrupado = f"{grupo}.pdf"
+                    temp_path = session_folder / nome_agrupado
+                    with open(temp_path, "wb") as f_out:
+                        writer.write(f_out)
+                    zf.write(temp_path, arcname=nome_agrupado)
 
         memory_zip.seek(0)
         st.download_button(
