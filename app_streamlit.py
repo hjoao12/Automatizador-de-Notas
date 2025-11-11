@@ -71,27 +71,26 @@ def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
 
     if "SABARA" in nome_norm:
-        return f"SB_{cidade_norm}" if cidade_norm else "SB"
+        return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
 
     for padrao, substituto in SUBSTITUICOES_FIXAS.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
 
-    return nome_norm
+    # default: normalize and replace spaces by underscore (upper case)
+    return re.sub(r"\s+", "_", nome_norm)
 
 def limpar_emitente(nome: str) -> str:
     if not nome:
         return "SEM_NOME"
     nome = unicodedata.normalize("NFKD", nome).encode("ASCII", "ignore").decode("ASCII")
     nome = re.sub(r"[^A-Z0-9_]+", "_", nome.upper())
-    while "__" in nome:
-        nome = nome.replace("__", "_")
-    return nome.strip("_")
+    return re.sub(r"_+", "_", nome).strip("_")
 
 def limpar_numero(numero: str) -> str:
     if not numero:
         return "0"
-    numero = re.sub(r"[.\-,/ ]", "", numero)
+    numero = re.sub(r"[^\d]", "", str(numero))
     return numero.lstrip("0") or "0"
 
 # =====================================================================
@@ -116,7 +115,11 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
             )
             tempo = round(time.time() - start, 2)
             texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
-            dados = json.loads(texto)
+            # defensiva: garantir dict
+            try:
+                dados = json.loads(texto)
+            except Exception:
+                dados = {"error": "Resposta da IA não era JSON", "_raw": texto}
             return dados, True, tempo
         except ResourceExhausted as e:
             delay = calcular_delay(tentativa, str(e))
@@ -130,183 +133,307 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
     return {"error": "Falha máxima de tentativas"}, False, 0
 
 # =====================================================================
-# INTERFACE STREAMLIT
+# UI: Upload e Processamento (uma vez)
 # =====================================================================
 st.subheader("📎 Faça upload de um ou mais arquivos PDF")
 uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True)
 
-# ------------------ PROCESSAMENTO PRINCIPAL ------------------
 if uploaded_files and st.button("🚀 Processar PDFs"):
+    # prepara sessão
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
 
-    resultados = []
-    start_global = time.time()
+    # lemos arquivos 1x
+    arquivos = []
+    for f in uploaded_files:
+        content = f.read()
+        arquivos.append({"name": f.name, "bytes": content})
+
+    # conta páginas
+    total_paginas = 0
+    for a in arquivos:
+        try:
+            r = PdfReader(io.BytesIO(a["bytes"]))
+            total_paginas += len(r.pages)
+        except Exception:
+            st.warning(f"Arquivo {a['name']} inválido — será ignorado.")
+
+    st.info(f"📄 Total de páginas a processar: {total_paginas}")
     prompt = (
-        "Analise a nota fiscal e extraia emitente, número da nota e cidade. "
-        "Responda SOMENTE em JSON no formato: "
-        "{\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
+        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
     )
 
-    total_paginas = 0
-    for f in uploaded_files:
-        f_bytes = io.BytesIO(f.read())
-        try:
-            leitor = PdfReader(f_bytes)
-            total_paginas += len(leitor.pages)
-        except:
-            continue
+    agrupados_bytes = {}   # chave (numero, emitente) -> list de page bytes
+    resultados_meta = []   # lista de dicts com info (novo nome, numero, emitente, paginas)
 
-    progress_bar = st.progress(0.0)
-    progresso_texto = st.empty()
     progresso = 0
-    agrupados = {}
+    progress_bar = st.progress(0.0)
+    progresso_text = st.empty()
+    start_all = time.time()
 
-    for file_index, file in enumerate(uploaded_files):
-        file.seek(0)
-        pdf_bytes = io.BytesIO(file.read())
+    for a in arquivos:
+        name = a["name"]
         try:
-            leitor = PdfReader(pdf_bytes)
-        except:
+            reader = PdfReader(io.BytesIO(a["bytes"]))
+        except Exception:
+            st.warning(f"Não foi possível ler {name}, pulando.")
             continue
 
-        for i, page in enumerate(leitor.pages):
-            start_page_time = time.time()
-            page_stream = io.BytesIO()
-            writer = PdfWriter()
-            writer.add_page(page)
-            writer.write(page_stream)
-            page_stream.seek(0)
+        for idx, page in enumerate(reader.pages):
+            # escreve página isolada em bytes
+            b = io.BytesIO()
+            w = PdfWriter()
+            w.add_page(page)
+            w.write(b)
+            b.seek(0)
 
-            dados, ok, tempo_pagina = chamar_gemini_retry(model, prompt, page_stream)
+            dados, ok, tempo = chamar_gemini_retry(model, prompt, b)
             if not ok or "error" in dados:
                 progresso += 1
+                progresso_text.text(f"{name} pág {idx+1} — ERRO IA ({dados.get('error','unknown')})")
+                progress_bar.progress(min(progresso/total_paginas, 1.0))
+                resultados_meta.append({
+                    "arquivo_origem": name,
+                    "pagina": idx+1,
+                    "emitente_detectado": dados.get("emitente") if isinstance(dados, dict) else "-",
+                    "numero_detectado": dados.get("numero_nota") if isinstance(dados, dict) else "-",
+                    "status": "ERRO"
+                })
                 continue
 
             emitente_raw = dados.get("emitente", "") or ""
             numero_raw = dados.get("numero_nota", "") or ""
             cidade_raw = dados.get("cidade", "") or ""
 
-            numero_limpo = limpar_numero(numero_raw)
+            numero = limpar_numero(numero_raw)
             nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
-            emitente_limpo = limpar_emitente(nome_map)
-            chave = (numero_limpo, emitente_limpo)
+            emitente = limpar_emitente(nome_map)
 
-            if chave not in agrupados:
-                agrupados[chave] = []
-            agrupados[chave].append(page_stream.getvalue())
+            key = (numero, emitente)
+            agrupados_bytes.setdefault(key, []).append(b.getvalue())
+
+            resultados_meta.append({
+                "arquivo_origem": name,
+                "pagina": idx+1,
+                "emitente_detectado": emitente_raw,
+                "numero_detectado": numero_raw,
+                "status": "OK",
+                "tempo_s": round(tempo, 2)
+            })
 
             progresso += 1
-            progress_bar.progress(min(progresso / total_paginas, 1.0))
-            progresso_texto.markdown(f"⏱ Página {progresso}/{total_paginas} processada em {tempo_pagina:.2f}s")
+            progress_bar.progress(min(progresso/total_paginas, 1.0))
+            progresso_text.text(f"{name} pág {idx+1} — OK ({tempo:.2f}s)")
 
-    # Criar PDFs agrupados
-    for (numero, emitente), paginas in agrupados.items():
+    # gera PDFs finais por grupo (numero+emitente)
+    resultados = []
+    for (numero, emitente), pages_bytes in agrupados_bytes.items():
+        if not numero or numero == "0":
+            continue
         writer = PdfWriter()
-        for p_bytes in paginas:
-            r = PdfReader(io.BytesIO(p_bytes))
-            writer.add_page(r.pages[0])
+        for pb in pages_bytes:
+            try:
+                r = PdfReader(io.BytesIO(pb))
+                for p in r.pages:
+                    writer.add_page(p)
+            except Exception:
+                continue
         nome_pdf = f"DOC {numero}_{emitente}.pdf"
-        with open(session_folder / nome_pdf, "wb") as f_out:
+        caminho = session_folder / nome_pdf
+        with open(caminho, "wb") as f_out:
             writer.write(f_out)
         resultados.append({
-            "novo": nome_pdf,
+            "file": nome_pdf,
             "numero": numero,
             "emitente": emitente,
-            "paginas": len(paginas)
+            "pages": len(pages_bytes)
         })
 
+    # salva no session_state para evitar reprocessar
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
-    st.success("✅ Processamento concluído! Você pode renomear, excluir ou agrupar antes de baixar.")
+    st.session_state["grupos"] = {"Sem Grupo": [r["file"] for r in resultados]}
+    st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
 
-from streamlit_sortables import sort_items  # precisa instalar: pip install streamlit-sortables
+    st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
+    st.experimental_rerun()  # recarrega para mostrar a área de gerenciamento
 
-# ------------------ GERENCIAMENTO DE NOTAS ------------------
+# =====================================================================
+# GERENCIAMENTO (drag & drop com streamlit-sortables ou fallback)
+# =====================================================================
 if "resultados" in st.session_state:
-    st.subheader("🗂️ Gerenciamento das Notas")
+    st.subheader("🗂️ Gerenciamento das Notas (arraste para agrupar / separar)")
     resultados = st.session_state["resultados"]
     session_folder = Path(st.session_state["session_folder"])
+    grupos = st.session_state.get("grupos", {"Sem Grupo": [r["file"] for r in resultados]})
+    novos_nomes = st.session_state.get("novos_nomes", {r["file"]: r["file"] for r in resultados})
 
-    # Inicializa grupos na sessão
-    if "grupos" not in st.session_state:
-        st.session_state["grupos"] = {"Sem Grupo": [r["novo"] for r in resultados]}
+    # Try import drag-and-drop lib; if not installed, fallback UI
+    try:
+        from streamlit_sortables import sort_items  # type: ignore
 
-    grupos = st.session_state["grupos"]
+        st.markdown("💡 **Arraste as notas entre os blocos abaixo para agrupar.** Crie novos grupos se necessário.")
+        # Build items expected by sort_items multi-containers: list[dict] -> {"group": name, "items": [...]}
+        items_for_sort = []
+        for group_name, files in grupos.items():
+            items_for_sort.append({"group": group_name, "items": files})
 
-    st.markdown("💡 **Arraste as notas entre os grupos abaixo** para agrupar manualmente. Você também pode criar ou excluir grupos.")
+        # Call sort_items with multi_containers True; shows vertical stacked containers
+        new_structure = sort_items(items_for_sort, key="notas_multi", direction="vertical", multi_containers=True)
 
-    # Criar ou remover grupos manualmente
-    with st.expander("➕ Gerenciar grupos"):
-        new_group = st.text_input("Nome do novo grupo (sem espaços):")
-        if st.button("Criar grupo") and new_group and new_group not in grupos:
-            grupos[new_group] = []
-            st.success(f"Grupo `{new_group}` criado!")
+        # new_structure is a list of dicts {"group": name, "items": [...]}
+        # Convert back to grupos mapping
+        updated = {}
+        for elem in new_structure:
+            gname = elem.get("group") or elem.get("header") or None
+            flist = elem.get("items", [])
+            if gname is None:
+                # fallback: try keys
+                keys = [k for k in elem.keys() if k != "items"]
+                gname = elem.get(keys[0], "Sem Grupo") if keys else "Sem Grupo"
+            updated[gname] = flist
 
-        del_group = st.selectbox("Excluir grupo existente:", [g for g in grupos if g != "Sem Grupo"])
-        if st.button("Excluir grupo") and del_group in grupos:
-            # move PDFs de volta para 'Sem Grupo'
-            grupos["Sem Grupo"].extend(grupos.pop(del_group))
-            st.warning(f"Grupo `{del_group}` removido.")
+        # ensure "Sem Grupo" exists
+        if "Sem Grupo" not in updated:
+            updated["Sem Grupo"] = []
 
-    # Mostrar listas arrastáveis (drag and drop)
-    st.markdown("### 📄 Notas agrupadas")
-    cols = st.columns(len(grupos))
-    updated_groups = {}
+        # save updated groups
+        st.session_state["grupos"] = updated
+        grupos = updated
 
-    for i, (nome_grupo, arquivos) in enumerate(grupos.items()):
-        with cols[i]:
-            st.write(f"📁 **{nome_grupo}** ({len(arquivos)} notas)")
-            items = [f"📄 {a}" for a in arquivos]
-            new_order = sort_items(items, key=f"sortable_{nome_grupo}", direction="vertical", multi_containers=True)
-            # Converte de volta para nomes dos arquivos
-            updated_groups[nome_grupo] = [a.replace("📄 ", "") for a in new_order]
+    except Exception as e:
+        # Fallback: no drag-and-drop available — show manual grouping UI
+        st.warning("Drag & drop não disponível neste ambiente. Usando modo manual.")
+        st.markdown("**Modo manual:** selecione notas e escolha um grupo para movê-las.")
+        # Show create group UI
+        with st.expander("➕ Gerenciar grupos"):
+            new_group = st.text_input("Nome do novo grupo (sem espaços):", key="cg")
+            if st.button("Criar grupo", key="btn_create"):
+                if new_group and new_group not in grupos:
+                    grupos[new_group] = []
+                    st.session_state["grupos"] = grupos
+                    st.success(f"Grupo '{new_group}' criado.")
+        # Manual move: select checkboxes and target group
+        all_files = [f["file"] for f in resultados]
+        to_move = []
+        st.markdown("**Selecione notas para mover:**")
+        for fname in all_files:
+            if st.checkbox(f"{fname}", key=f"chk_{fname}", value=False):
+                to_move.append(fname)
+        target = st.selectbox("Mover selecionadas para grupo:", list(grupos.keys()), key="sel_group")
+        if st.button("Mover selecionadas"):
+            for t in to_move:
+                # remove from current
+                for g, fl in list(grupos.items()):
+                    if t in fl:
+                        fl.remove(t)
+                grupos[target].append(t)
+            st.session_state["grupos"] = grupos
+            st.experimental_rerun()
 
-    # Atualiza os grupos com o novo estado
-    st.session_state["grupos"] = updated_groups
+    # Show groups and provide rename / delete controls
+    st.markdown("---")
+    st.markdown("### ✏️ Renomear / Excluir / Separar notas")
+    # Build index for lookup to display metadata
+    meta_by_file = {r["file"]: r for r in resultados}
+    to_delete = []
+    for gname, files in grupos.items():
+        st.markdown(f"**📁 {gname}** — {len(files)} notas")
+        for f in files:
+            cols = st.columns([4, 2, 1])
+            with cols[0]:
+                newname = st.text_input(f"Nome final para {f}", novos_nomes.get(f, f), key=f"rename_{f}")
+                novos_nomes[f] = newname
+            with cols[1]:
+                st.text(f"{meta_by_file.get(f,{}).get('emitente','-')} ({meta_by_file.get(f,{}).get('numero','-')})")
+            with cols[2]:
+                if st.button("🗑️", key=f"del_{f}"):
+                    to_delete.append((gname, f))
+        st.markdown("")
 
-    # Opção para editar nomes individuais ou remover
-    st.markdown("### ✏️ Renomear / Excluir notas")
-    novos_nomes = {}
-    for res in resultados:
-        col1, col2, col3 = st.columns([3, 3, 1])
-        with col1:
-            novo_nome = st.text_input(f"{res['emitente']} (DOC {res['numero']})", res['novo'])
-        with col2:
-            manter = st.checkbox("✅ Incluir", key=f"keep_{res['novo']}", value=True)
-        with col3:
-            grupo_atual = next((g for g, arqs in grupos.items() if res['novo'] in arqs), "Sem Grupo")
-            st.text(grupo_atual)
+    # apply deletions
+    if to_delete:
+        for gname, f in to_delete:
+            if f in grupos.get(gname, []):
+                grupos[gname].remove(f)
+            # also remove file physically if exists
+            fp = session_folder / f
+            try:
+                if fp.exists():
+                    fp.unlink()
+            except Exception:
+                pass
+        st.session_state["grupos"] = grupos
+        st.session_state["novos_nomes"] = {**novos_nomes}
+        st.success("Notas excluídas com sucesso.")
+        st.experimental_rerun()
 
-        if manter:
-            novos_nomes[res['novo']] = novo_nome
+    # Save name edits
+    st.session_state["novos_nomes"] = {**novos_nomes}
 
-    # Gerar ZIP final
+    # Create / Merge groups actions
+    st.markdown("---")
+    with st.expander("🛠️ Ações de grupo"):
+        col_a, col_b = st.columns([2,2])
+        with col_a:
+            src_group = st.selectbox("Selecionar grupo para separar (mover todos para Sem Grupo):", list(grupos.keys()), key="src_grp")
+            if st.button("Separar grupo (mover tudo para Sem Grupo)"):
+                items = grupos.get(src_group, []).copy()
+                grupos["Sem Grupo"].extend(items)
+                grupos[src_group] = []
+                st.session_state["grupos"] = grupos
+                st.success(f"Grupo {src_group} separado.")
+                st.experimental_rerun()
+        with col_b:
+            merge_from = st.multiselect("Selecionar grupos para mesclar:", [g for g in grupos.keys() if g!="Sem Grupo"], key="merge_groups")
+            merge_to = st.text_input("Nome do novo grupo (criar/usar):", key="merge_to")
+            if st.button("Mesclar selecionados"):
+                if not merge_to:
+                    st.warning("Informe um nome para o grupo destino.")
+                else:
+                    if merge_to not in grupos:
+                        grupos[merge_to] = []
+                    for mg in merge_from:
+                        grupos[merge_to].extend(grupos.get(mg, []))
+                        grupos[mg] = []
+                    st.session_state["grupos"] = grupos
+                    st.success(f"Grupos mesclados em {merge_to}.")
+                    st.experimental_rerun()
+
+    # Final: gerar ZIP com nomes editados e grupos
+    st.markdown("---")
     if st.button("📦 Gerar ZIP Final"):
         memory_zip = io.BytesIO()
         with zipfile.ZipFile(memory_zip, "w") as zf:
-            for grupo, arquivos in grupos.items():
-                if grupo == "Sem Grupo":
-                    for nome in arquivos:
-                        nome_final = novos_nomes.get(nome, nome)
-                        zf.write(session_folder / nome, arcname=nome_final)
+            for gname, files in grupos.items():
+                if gname == "Sem Grupo":
+                    for fname in files:
+                        arcname = novos_nomes.get(fname, fname)
+                        src = session_folder / fname
+                        if src.exists():
+                            zf.write(src, arcname=arcname)
                 else:
+                    # criar PDF agrupado por esse grupo
                     writer = PdfWriter()
-                    for nome in arquivos:
-                        r = PdfReader(session_folder / nome)
-                        for p in r.pages:
-                            writer.add_page(p)
-                    nome_agrupado = f"{grupo}.pdf"
-                    temp_path = session_folder / nome_agrupado
-                    with open(temp_path, "wb") as f_out:
-                        writer.write(f_out)
-                    zf.write(temp_path, arcname=nome_agrupado)
-
+                    total_pages = 0
+                    for fname in files:
+                        src = session_folder / fname
+                        if not src.exists():
+                            continue
+                        try:
+                            r = PdfReader(src)
+                            for p in r.pages:
+                                writer.add_page(p)
+                                total_pages += 1
+                        except Exception:
+                            continue
+                    if total_pages > 0:
+                        grouped_name = f"{gname}.pdf"
+                        tmp_path = session_folder / grouped_name
+                        with open(tmp_path, "wb") as of:
+                            writer.write(of)
+                        zf.write(tmp_path, arcname=novos_nomes.get(grouped_name, grouped_name))
         memory_zip.seek(0)
-        st.download_button(
-            "⬇️ Baixar notas finais",
-            data=memory_zip,
-            file_name="notas_processadas.zip",
-            mime="application/zip"
-        )
+        st.download_button("⬇️ Baixar notas finais (ZIP)", data=memory_zip, file_name="notas_processadas.zip", mime="application/zip")
