@@ -70,13 +70,9 @@ def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
 
-    # Sabará com cidade abreviada
     if "SABARA" in nome_norm:
-        if cidade_norm:
-            return f"SB_{cidade_norm}"
-        return "SB"
+        return f"SB_{cidade_norm}" if cidade_norm else "SB"
 
-    # Substituições fixas
     for padrao, substituto in SUBSTITUICOES_FIXAS.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
@@ -139,6 +135,7 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
 st.subheader("📎 Faça upload de um ou mais arquivos PDF")
 uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True)
 
+# ------------------ PROCESSAMENTO PRINCIPAL ------------------
 if uploaded_files and st.button("🚀 Processar PDFs"):
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
@@ -164,7 +161,6 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
     progress_bar = st.progress(0.0)
     progresso_texto = st.empty()
     progresso = 0
-
     agrupados = {}
 
     for file_index, file in enumerate(uploaded_files):
@@ -205,7 +201,7 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
             progress_bar.progress(min(progresso / total_paginas, 1.0))
             progresso_texto.markdown(f"⏱ Página {progresso}/{total_paginas} processada em {tempo_pagina:.2f}s")
 
-    # Juntar PDFs por grupo
+    # Criar PDFs agrupados
     for (numero, emitente), paginas in agrupados.items():
         writer = PdfWriter()
         for p_bytes in paginas:
@@ -214,29 +210,71 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
         nome_pdf = f"DOC {numero}_{emitente}.pdf"
         with open(session_folder / nome_pdf, "wb") as f_out:
             writer.write(f_out)
-        resultados.append({"novo": nome_pdf, "numero": numero, "emitente": emitente, "paginas": len(paginas)})
+        resultados.append({
+            "novo": nome_pdf,
+            "numero": numero,
+            "emitente": emitente,
+            "paginas": len(paginas)
+        })
 
-    # Editor de renomeação antes do download
-    st.subheader("✏️ Renomeie antes de baixar")
+    st.session_state["resultados"] = resultados
+    st.session_state["session_folder"] = str(session_folder)
+    st.success("✅ Processamento concluído! Você pode renomear, excluir ou agrupar antes de baixar.")
+
+# ------------------ RENOMEAR / EXCLUIR / AGRUPAR ------------------
+if "resultados" in st.session_state:
+    st.subheader("🗂️ Gerenciamento das Notas")
+    resultados = st.session_state["resultados"]
+    session_folder = Path(st.session_state["session_folder"])
+
     novos_nomes = {}
+    notas_mantidas = []
+
     for res in resultados:
-        novo_nome = st.text_input(f"{res['emitente']} (DOC {res['numero']})", res['novo'])
-        novos_nomes[res['novo']] = novo_nome
+        col1, col2, col3 = st.columns([3, 3, 1])
+        with col1:
+            novo_nome = st.text_input(f"{res['emitente']} (DOC {res['numero']})", res['novo'])
+        with col2:
+            grupo = st.text_input(f"Agrupar com (opcional)", key=f"grupo_{res['novo']}", placeholder="ex: GRUPO1")
+        with col3:
+            manter = st.checkbox("✅ Incluir", key=f"keep_{res['novo']}", value=True)
 
-    # Compactar para download
-    memory_zip = io.BytesIO()
-    with zipfile.ZipFile(memory_zip, "w") as zf:
-        for f in os.listdir(session_folder):
-            nome_final = novos_nomes.get(f, f)
-            zf.write(session_folder / f, arcname=nome_final)
-    memory_zip.seek(0)
+        if manter:
+            notas_mantidas.append(res)
+            novos_nomes[res['novo']] = {"nome": novo_nome, "grupo": grupo.strip() if grupo else None}
 
-    tempo_total = round(time.time() - start_global, 2)
-    st.success(f"🏁 Processamento concluído em {tempo_total}s.")
+    if st.button("📦 Gerar ZIP Final"):
+        memory_zip = io.BytesIO()
+        with zipfile.ZipFile(memory_zip, "w") as zf:
+            grupos = {}
 
-    st.download_button(
-        "⬇️ Baixar arquivos processados",
-        data=memory_zip,
-        file_name="notas_processadas.zip",
-        mime="application/zip"
-    )
+            for f in notas_mantidas:
+                meta = novos_nomes.get(f["novo"], {})
+                nome_final = meta.get("nome", f["novo"])
+                grupo = meta.get("grupo")
+
+                if grupo:
+                    grupos.setdefault(grupo, []).append(f)
+                else:
+                    zf.write(session_folder / f["novo"], arcname=nome_final)
+
+            # Agrupar PDFs manualmente
+            for grupo, itens in grupos.items():
+                writer = PdfWriter()
+                for item in itens:
+                    r = PdfReader(session_folder / item["novo"])
+                    for p in r.pages:
+                        writer.add_page(p)
+                nome_agrupado = f"{grupo}.pdf"
+                temp_path = session_folder / nome_agrupado
+                with open(temp_path, "wb") as f_out:
+                    writer.write(f_out)
+                zf.write(temp_path, arcname=nome_agrupado)
+
+        memory_zip.seek(0)
+        st.download_button(
+            "⬇️ Baixar notas finais",
+            data=memory_zip,
+            file_name="notas_processadas.zip",
+            mime="application/zip"
+        )
