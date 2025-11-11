@@ -20,17 +20,15 @@ load_dotenv()
 st.set_page_config(page_title="Automatizador de Notas", page_icon="🧾", layout="wide")
 st.title("🧠 Automatizador de Notas Fiscais PDF")
 
-# Diretórios temporários
 TEMP_FOLDER = Path("./temp")
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-# Limites e modelo
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
 MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.0-flash")
 
-# Configuração do Gemini
+# Gemini
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GEMINI_API_KEY:
     st.error("❌ Chave GOOGLE_API_KEY não encontrada no .env ou nos segredos do Streamlit.")
@@ -41,7 +39,7 @@ model = genai.GenerativeModel(MODEL_NAME)
 st.success("✅ Google Gemini configurado com sucesso!")
 
 # ==============================================================================
-# 🧹 Substituições e normalização
+# 🧩 Substituições e normalização
 # ==============================================================================
 SUBSTITUICOES_NOMES = {
     "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
@@ -54,7 +52,7 @@ SUBSTITUICOES_NOMES = {
     "SABARA QUIMICOS E INGREDIENTES LTDA": "SABARA",
     "SABARÁ QUIMICOS E INGREDIENTES SA": "SABARA",
     "SABARÁ QUIMICOS E INGREDIENTES LTDA": "SABARA",
-    "TRANSPORTE LIDA LTDA": "TRANSPORTE_LIDA",  # ✅ NOVO PADRÃO
+    "TRANSPORTE LIDA LTDA": "TRANSPORTE_LIDA"
 }
 
 def _normalizar_texto(s: str) -> str:
@@ -68,14 +66,11 @@ def _normalizar_texto(s: str) -> str:
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
-
     if "SABARA" in nome_norm and cidade_norm:
         return f"SABARA_{cidade_norm}"
-
     for padrao_raw, substituto in SUBSTITUICOES_NOMES.items():
         if _normalizar_texto(padrao_raw) in nome_norm:
             return substituto
-
     return nome_norm
 
 def limpar_emitente(nome: str) -> str:
@@ -99,10 +94,7 @@ def limpar_numero(numero: str) -> str:
 def calcular_delay(tentativa, error_msg):
     if "retry in" in error_msg.lower():
         try:
-            return min(
-                float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2,
-                MAX_RETRY_DELAY,
-            )
+            return min(float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2, MAX_RETRY_DELAY)
         except:
             pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
@@ -112,12 +104,9 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
         try:
             start = time.time()
             resp = model.generate_content(
-                [
-                    prompt_instrucao,
-                    {"mime_type": "application/pdf", "data": page_stream.getvalue()},
-                ],
+                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
                 generation_config={"response_mime_type": "application/json"},
-                request_options={"timeout": 60},
+                request_options={'timeout': 60}
             )
             tempo = round(time.time() - start, 2)
             texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
@@ -129,14 +118,13 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
             time.sleep(delay)
         except Exception as e:
             if tentativa < MAX_RETRIES:
-                st.warning(f"Tentativa {tentativa + 1} falhou, tentando novamente...")
                 time.sleep(MIN_RETRY_DELAY)
             else:
                 return {"error": str(e)}, False, 0
     return {"error": "Falha máxima de tentativas"}, False, 0
 
 # ==============================================================================
-# 💻 Interface Streamlit
+# 🖇️ Interface Streamlit
 # ==============================================================================
 st.subheader("📎 Faça upload de um ou mais arquivos PDF")
 uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True)
@@ -145,28 +133,37 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
+
     resultados = []
-    pdf_agrupados = {}
-    start_global = time.time()
+    notas_agrupadas = {}  # Agrupamento (numero, emitente)
 
     prompt = (
-        "Analise a nota fiscal. Extraia emitente, número da nota e cidade. "
-        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+        "Analise a nota fiscal (NF-e). Extraia emitente, número da nota, cidade e sequência (ex: 1/4, 2/4). "
+        "Responda SOMENTE em JSON no formato: "
+        "{\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\",\"sequencia\":\"PARTE/TOTAL\"}"
     )
 
-    total_paginas = sum(len(PdfReader(io.BytesIO(f.read())).pages) for f in uploaded_files)
+    total_paginas = 0
+    for f in uploaded_files:
+        pdf_temp = io.BytesIO(f.read())
+        try:
+            leitor = PdfReader(pdf_temp)
+            total_paginas += len(leitor.pages)
+        except:
+            st.warning(f"⚠️ Arquivo {f.name} está vazio ou corrompido, ignorado.")
+        f.seek(0)
+
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
     progress_bar = st.progress(0.0)
     progresso_texto = st.empty()
     progresso = 0
 
-    for file in uploaded_files:
-        file_name = file.name
+    for file_index, file in enumerate(uploaded_files):
         pdf_bytes = io.BytesIO(file.read())
         leitor = PdfReader(pdf_bytes)
+        file_name = file.name
 
         for i, page in enumerate(leitor.pages):
-            start_page_time = time.time()
             page_stream = io.BytesIO()
             writer = PdfWriter()
             writer.add_page(page)
@@ -174,72 +171,52 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
             page_stream.seek(0)
 
             dados, ok, tempo_pagina = chamar_gemini_retry(model, prompt, page_stream)
-
             if ok and "error" not in dados:
                 emitente = dados.get("emitente", "")
                 numero = dados.get("numero_nota", "")
                 cidade = dados.get("cidade", "")
+                seq = dados.get("sequencia", "")
+
                 numero_limpo = limpar_numero(numero)
                 nome_map = substituir_nome_emitente(emitente, cidade)
                 emitente_limpo = limpar_emitente(nome_map)
 
-                chave_nota = f"{numero_limpo}_{emitente_limpo}"
-                pdf_agrupados.setdefault(chave_nota, []).append(io.BytesIO(page_stream.getvalue()))
+                chave = (numero_limpo, emitente_limpo)
+                notas_agrupadas.setdefault(chave, []).append(page)
 
-                status_msg = "✅ Sucesso"
-                novo_nome = f"DOC {numero_limpo}_{emitente_limpo}.pdf"
+                status_msg = f"✅ Sucesso ({seq})"
             else:
                 status_msg = f"❌ {dados.get('error', 'Erro desconhecido')}"
-                novo_nome = "-"
 
             progresso += 1
             progress_bar.progress(progresso / total_paginas)
-            progresso_texto.markdown(
-                f"⏱ Página {progresso}/{total_paginas} — **{file_name} (pág {i+1})** → {status_msg} ({tempo_pagina:.2f}s)"
-            )
+            progresso_texto.markdown(f"📄 {file_name} pág {i+1} — {status_msg}")
 
             resultados.append({
-                "Arquivo Original": file_name,
-                "Novo Nome": novo_nome,
-                "Status": status_msg,
-                "Tempo (s)": round(time.time() - start_page_time, 2),
+                "arquivo": file_name,
+                "pagina": i + 1,
+                "emitente": emitente,
+                "numero": numero,
+                "status": status_msg,
+                "tempo": tempo_pagina
             })
 
-    # 🔗 Agrupar e gerar PDFs finais
-    st.info("🔗 Unindo páginas de notas com o mesmo número...")
-    agrupamento_info = []
-
-    for chave, lista_paginas in pdf_agrupados.items():
+    # Agrupar páginas da mesma nota
+    for (numero, emitente), paginas in notas_agrupadas.items():
         writer = PdfWriter()
-        for buffer_pagina in lista_paginas:
-            reader = PdfReader(buffer_pagina)
-            for page in reader.pages:
-                writer.add_page(page)
-
-        numero_limpo, emitente_limpo = chave.split("_", 1)
-        nome_final = f"DOC {numero_limpo}_{emitente_limpo}.pdf"
-        caminho_final = session_folder / nome_final
-
-        with open(caminho_final, "wb") as f_out:
+        for p in paginas:
+            writer.add_page(p)
+        destino = session_folder / f"DOC {numero}_{emitente}.pdf"
+        with open(destino, "wb") as f_out:
             writer.write(f_out)
 
-        agrupamento_info.append({
-            "Arquivo Final": nome_final,
-            "Emitente": emitente_limpo,
-            "Número da Nota": numero_limpo,
-            "Total de Páginas": len(lista_paginas)
-        })
-
-    # 📦 Compactar
+    # Compactar
     memory_zip = io.BytesIO()
-    with zipfile.ZipFile(memory_zip, "w") as zf:
+    with zipfile.ZipFile(memory_zip, 'w') as zf:
         for f in os.listdir(session_folder):
             zf.write(session_folder / f, arcname=f)
     memory_zip.seek(0)
 
-    tempo_total = round(time.time() - start_global, 2)
-    st.success(f"🏁 Concluído em {tempo_total}s ({len(agrupamento_info)} notas processadas).")
+    st.success("🏁 Processamento concluído com agrupamento de notas em sequência!")
     st.download_button("⬇️ Baixar arquivos processados", data=memory_zip, file_name="notas_processadas.zip", mime="application/zip")
-
-    st.subheader("📋 Resultados Detalhados")
-    st.dataframe(agrupamento_info)
+    st.dataframe(resultados)
