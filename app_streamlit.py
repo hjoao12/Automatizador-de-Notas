@@ -508,9 +508,8 @@ if "resultados" in st.session_state:
                 st.download_button(f"⬇️ Baixar {fname}", data=data, file_name=novos_nomes.get(fname, fname), mime="application/pdf")
             else:
                 st.warning("Arquivo não encontrado.")
-            # reset action selector back to ...
-            st.session_state[f"action_{fname}"] = "..."
-        st.markdown("<hr/>", unsafe_allow_html=True)
+            # Não podemos modificar session_state durante renderização
+            # O selectbox permanecerá na opção selecionada até o próximo rerun
 
     st.markdown("</div>", unsafe_allow_html=True)
 
