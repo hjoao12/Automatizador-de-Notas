@@ -166,7 +166,7 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
     )
 
     agrupados_bytes = {}   # chave (numero, emitente) -> list de page bytes
-    resultados_meta = []   # lista de dicts com info (novo nome, numero, emitente, paginas)
+    resultados_meta = []   # lista de dicts com info (arquivo_origem, pagina, emitente_detectado, numero_detectado, status)
 
     progresso = 0
     progress_bar = st.progress(0.0)
@@ -261,150 +261,151 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
     st.rerun()  # recarrega para mostrar a área de gerenciamento
 
 # =====================================================================
-# GERENCIAMENTO (drag & drop com streamlit-sortables ou fallback)
+# GERENCIAMENTO SIMPLIFICADO (selecionar + Agrupar Selecionadas)
 # =====================================================================
 if "resultados" in st.session_state:
-    st.subheader("🗂️ Gerenciamento das Notas (arraste para agrupar / separar)")
+    st.subheader("🗂️ Gerenciamento das Notas — Simples e Intuitivo")
     resultados = st.session_state["resultados"]
     session_folder = Path(st.session_state["session_folder"])
     grupos = st.session_state.get("grupos", {"Sem Grupo": [r["file"] for r in resultados]})
     novos_nomes = st.session_state.get("novos_nomes", {r["file"]: r["file"] for r in resultados})
 
-    # Try import drag-and-drop lib; if not installed, fallback UI
-    try:
-        from streamlit_sortables import sort_items  # type: ignore
+    st.markdown("Use a caixa abaixo para **selecionar notas**. Depois escolha uma ação: **Agrupar Selecionadas**, **Remover Selecionadas do Grupo** ou **Excluir Selecionadas**.")
+    st.markdown("Você também pode editar o nome final de cada nota na lista abaixo.")
 
-        st.markdown("💡 **Arraste as notas entre os blocos abaixo para agrupar.** Crie novos grupos se necessário.")
-        # Build items expected by sort_items multi-containers: list[dict] -> {"group": name, "items": [...]}
-        items_for_sort = []
-        for group_name, files in grupos.items():
-            items_for_sort.append({"group": group_name, "items": files})
+    # lista de arquivos disponíveis (ordem)
+    all_files = [r["file"] for r in resultados]
 
-        # Call sort_items with multi_containers True; shows vertical stacked containers
-        new_structure = sort_items(items_for_sort, key="notas_multi", direction="vertical", multi_containers=True)
+    # show a simple table-like view with editable names (text_inputs)
+    st.markdown("### ✏️ Nomes finais (edite conforme necessário)")
+    for f in all_files:
+        col1, col2, col3 = st.columns([5,2,1])
+        with col1:
+            novos_nomes[f] = st.text_input(f"Arquivo: {f}", novos_nomes.get(f, f), key=f"rename_{f}")
+        with col2:
+            # show meta info
+            meta = next((r for r in resultados if r["file"]==f), {})
+            st.text(f"{meta.get('emitente','-')} / {meta.get('numero','-')}")
+        with col3:
+            grp_label = next((g for g, files in grupos.items() if f in files), "Sem Grupo")
+            st.text(grp_label)
 
-        # new_structure is a list of dicts {"group": name, "items": [...]}
-        # Convert back to grupos mapping
-        updated = {}
-        for elem in new_structure:
-            gname = elem.get("group") or elem.get("header") or None
-            flist = elem.get("items", [])
-            if gname is None:
-                # fallback: try keys
-                keys = [k for k in elem.keys() if k != "items"]
-                gname = elem.get(keys[0], "Sem Grupo") if keys else "Sem Grupo"
-            updated[gname] = flist
+    st.session_state["novos_nomes"] = novos_nomes
 
-        # ensure "Sem Grupo" exists
-        if "Sem Grupo" not in updated:
-            updated["Sem Grupo"] = []
-
-        # save updated groups
-        st.session_state["grupos"] = updated
-        grupos = updated
-
-    except Exception as e:
-        # Fallback: no drag-and-drop available — show manual grouping UI
-        st.warning("Drag & drop não disponível neste ambiente. Usando modo manual.")
-        st.markdown("**Modo manual:** selecione notas e escolha um grupo para movê-las.")
-        # Show create group UI
-        with st.expander("➕ Gerenciar grupos"):
-            new_group = st.text_input("Nome do novo grupo (sem espaços):", key="cg")
-            if st.button("Criar grupo", key="btn_create"):
-                if new_group and new_group not in grupos:
-                    grupos[new_group] = []
-                    st.session_state["grupos"] = grupos
-                    st.success(f"Grupo '{new_group}' criado.")
-        # Manual move: select checkboxes and target group
-        all_files = [f["file"] for f in resultados]
-        to_move = []
-        st.markdown("**Selecione notas para mover:**")
-        for fname in all_files:
-            if st.checkbox(f"{fname}", key=f"chk_{fname}", value=False):
-                to_move.append(fname)
-        target = st.selectbox("Mover selecionadas para grupo:", list(grupos.keys()), key="sel_group")
-        if st.button("Mover selecionadas"):
-            for t in to_move:
-                # remove from current
-                for g, fl in list(grupos.items()):
-                    if t in fl:
-                        fl.remove(t)
-                grupos[target].append(t)
-            st.session_state["grupos"] = grupos
-            st.experimental_rerun()
-
-    # Show groups and provide rename / delete controls
     st.markdown("---")
-    st.markdown("### ✏️ Renomear / Excluir / Separar notas")
-    # Build index for lookup to display metadata
-    meta_by_file = {r["file"]: r for r in resultados}
-    to_delete = []
-    for gname, files in grupos.items():
-        st.markdown(f"**📁 {gname}** — {len(files)} notas")
-        for f in files:
-            cols = st.columns([4, 2, 1])
-            with cols[0]:
-                newname = st.text_input(f"Nome final para {f}", novos_nomes.get(f, f), key=f"rename_{f}")
-                novos_nomes[f] = newname
-            with cols[1]:
-                st.text(f"{meta_by_file.get(f,{}).get('emitente','-')} ({meta_by_file.get(f,{}).get('numero','-')})")
-            with cols[2]:
-                if st.button("🗑️", key=f"del_{f}"):
-                    to_delete.append((gname, f))
-        st.markdown("")
+    st.markdown("### ✅ Seleção e ações em massa")
+    selecionadas = st.multiselect("Selecione as notas para a ação:", options=all_files, default=[])
 
-    # apply deletions
-    if to_delete:
-        for gname, f in to_delete:
-            if f in grupos.get(gname, []):
-                grupos[gname].remove(f)
-            # also remove file physically if exists
-            fp = session_folder / f
-            try:
-                if fp.exists():
-                    fp.unlink()
-            except Exception:
-                pass
-        st.session_state["grupos"] = grupos
-        st.session_state["novos_nomes"] = {**novos_nomes}
-        st.success("Notas excluídas com sucesso.")
-        st.experimental_rerun()
-
-    # Save name edits
-    st.session_state["novos_nomes"] = {**novos_nomes}
-
-    # Create / Merge groups actions
-    st.markdown("---")
-    with st.expander("🛠️ Ações de grupo"):
-        col_a, col_b = st.columns([2,2])
-        with col_a:
-            src_group = st.selectbox("Selecionar grupo para separar (mover todos para Sem Grupo):", list(grupos.keys()), key="src_grp")
-            if st.button("Separar grupo (mover tudo para Sem Grupo)"):
-                items = grupos.get(src_group, []).copy()
-                grupos["Sem Grupo"].extend(items)
-                grupos[src_group] = []
+    col_a, col_b, col_c = st.columns([2,2,2])
+    with col_a:
+        group_name = st.text_input("Nome do grupo para agrupar (ex: FATURAS_JUL)", key="group_name_input")
+        if st.button("➕ Agrupar Selecionadas"):
+            if not selecionadas:
+                st.warning("Nenhuma nota selecionada.")
+            else:
+                target = group_name.strip() or f"Grupo_{int(time.time())}"
+                if target not in grupos:
+                    grupos[target] = []
+                # move selecionadas para target (removendo de qualquer outro grupo)
+                for s in selecionadas:
+                    for g, fl in grupos.items():
+                        if s in fl:
+                            fl.remove(s)
+                    grupos[target].append(s)
                 st.session_state["grupos"] = grupos
-                st.success(f"Grupo {src_group} separado.")
-                st.experimental_rerun()
-        with col_b:
-            merge_from = st.multiselect("Selecionar grupos para mesclar:", [g for g in grupos.keys() if g!="Sem Grupo"], key="merge_groups")
-            merge_to = st.text_input("Nome do novo grupo (criar/usar):", key="merge_to")
-            if st.button("Mesclar selecionados"):
-                if not merge_to:
-                    st.warning("Informe um nome para o grupo destino.")
-                else:
-                    if merge_to not in grupos:
-                        grupos[merge_to] = []
-                    for mg in merge_from:
-                        grupos[merge_to].extend(grupos.get(mg, []))
-                        grupos[mg] = []
-                    st.session_state["grupos"] = grupos
-                    st.success(f"Grupos mesclados em {merge_to}.")
-                    st.experimental_rerun()
+                st.success(f"{len(selecionadas)} nota(s) agrupada(s) em '{target}'.")
+    with col_b:
+        if st.button("↩️ Remover Selecionadas do Grupo (Mover para Sem Grupo)"):
+            if not selecionadas:
+                st.warning("Nenhuma nota selecionada.")
+            else:
+                for s in selecionadas:
+                    for g, fl in grupos.items():
+                        if s in fl:
+                            fl.remove(s)
+                grupos.setdefault("Sem Grupo", [])
+                grupos["Sem Grupo"].extend(selecionadas)
+                # dedupe
+                grupos["Sem Grupo"] = list(dict.fromkeys(grupos["Sem Grupo"]))
+                st.session_state["grupos"] = grupos
+                st.success(f"{len(selecionadas)} nota(s) movida(s) para 'Sem Grupo'.")
+    with col_c:
+        if st.button("🗑️ Excluir Selecionadas"):
+            if not selecionadas:
+                st.warning("Nenhuma nota selecionada.")
+            else:
+                for s in selecionadas:
+                    # remove from groups
+                    for g, fl in list(grupos.items()):
+                        if s in fl:
+                            fl.remove(s)
+                    # remove physical file
+                    src = session_folder / s
+                    try:
+                        if src.exists():
+                            src.unlink()
+                    except Exception:
+                        pass
+                    # remove from resultados list
+                    st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != s]
+                    # remove name entry
+                    if s in st.session_state.get("novos_nomes", {}):
+                        st.session_state["novos_nomes"].pop(s, None)
+                st.session_state["grupos"] = grupos
+                st.success(f"{len(selecionadas)} nota(s) excluída(s).")
 
-    # Final: gerar ZIP com nomes editados e grupos
     st.markdown("---")
-    if st.button("📦 Gerar ZIP Final"):
+    st.markdown("### 📂 Grupos existentes (clique para expandir)")
+    # show groups and contents
+    for gname, files in grupos.items():
+        with st.expander(f"{gname} — {len(files)} notas", expanded=False):
+            if not files:
+                st.write("_(vazio)_")
+            else:
+                for f in files:
+                    meta = next((r for r in resultados if r["file"]==f), {})
+                    cols = st.columns([6,2,1])
+                    with cols[0]:
+                        st.text(f)
+                    with cols[1]:
+                        st.text(f"{meta.get('emitente','-')}")
+                    with cols[2]:
+                        if st.button("Remover", key=f"rm_{gname}_{f}"):
+                            # move to Sem Grupo
+                            grupos[gname].remove(f)
+                            grupos.setdefault("Sem Grupo", []).append(f)
+                            st.session_state["grupos"] = grupos
+                            st.experimental_rerun()
+
+    st.markdown("---")
+    # group rename / delete
+    st.markdown("### ⚙️ Gerenciar grupos")
+    col1, col2 = st.columns(2)
+    with col1:
+        sel_group = st.selectbox("Selecionar grupo para renomear:", [g for g in grupos.keys() if g!="Sem Grupo"], index=0 if any(g!="Sem Grupo" for g in grupos.keys()) else 0)
+        new_name_for_group = st.text_input("Novo nome do grupo:", key="rename_group_input")
+        if st.button("Renomear grupo"):
+            if sel_group and new_name_for_group:
+                grupos[new_name_for_group] = grupos.pop(sel_group)
+                st.session_state["grupos"] = grupos
+                st.success(f"Grupo '{sel_group}' renomeado para '{new_name_for_group}'.")
+    with col2:
+        del_group = st.selectbox("Selecionar grupo para excluir (moverá as notas para 'Sem Grupo'):", [g for g in grupos.keys() if g!="Sem Grupo"], index=0 if any(g!="Sem Grupo" for g in grupos.keys()) else 0)
+        if st.button("Excluir grupo"):
+            if del_group and del_group in grupos:
+                itens = grupos.pop(del_group)
+                grupos.setdefault("Sem Grupo", []).extend(itens)
+                # dedupe
+                grupos["Sem Grupo"] = list(dict.fromkeys(grupos["Sem Grupo"]))
+                st.session_state["grupos"] = grupos
+                st.success(f"Grupo '{del_group}' excluído e suas notas movidas para 'Sem Grupo'.")
+
+    st.session_state["grupos"] = grupos
+    st.session_state["novos_nomes"] = novos_nomes
+
+    st.markdown("---")
+    # Final: gerar ZIP com nomes editados e grupos
+    if st.button("📦 Baixar ZIP final (respeita agrupamentos e nomes)"):
         memory_zip = io.BytesIO()
         with zipfile.ZipFile(memory_zip, "w") as zf:
             for gname, files in grupos.items():
@@ -434,6 +435,7 @@ if "resultados" in st.session_state:
                         tmp_path = session_folder / grouped_name
                         with open(tmp_path, "wb") as of:
                             writer.write(of)
+                        # use group name as arcname (but allow override via novos_nomes if user edited)
                         zf.write(tmp_path, arcname=novos_nomes.get(grouped_name, grouped_name))
         memory_zip.seek(0)
         st.download_button("⬇️ Baixar notas finais (ZIP)", data=memory_zip, file_name="notas_processadas.zip", mime="application/zip")
