@@ -18,8 +18,75 @@ from dotenv import load_dotenv
 # CONFIGURAÇÃO INICIAL
 # =====================================================================
 load_dotenv()
-st.set_page_config(page_title="Automatizador de Notas", page_icon="🧾", layout="wide")
-st.title("🧠 Automatizador de Notas Fiscais PDF — Painel Corporativo")
+st.set_page_config(
+    page_title="Automatizador de Notas Fiscais",
+    page_icon="🧾",
+    layout="wide"
+)
+
+# ======= CSS Corporativo Claro =======
+st.markdown("""
+<style>
+body {
+    background-color: #f8f9fa;
+    color: #212529;
+    font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+}
+[data-testid="stSidebar"] {
+    background-color: #ffffff;
+    border-right: 1px solid #e9ecef;
+}
+h1, h2, h3, h4 {
+    color: #004085;
+}
+div.stButton > button {
+    background-color: #007bff;
+    color: white;
+    border-radius: 8px;
+    border: none;
+    font-weight: 500;
+}
+div.stButton > button:hover {
+    background-color: #0056b3;
+    color: #fff;
+}
+.stProgress > div > div > div > div {
+    background-color: #28a745 !important;
+}
+.top-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+.block-container {
+    padding-top: 2rem;
+}
+.success-log {
+    color: #155724;
+    background-color: #d4edda;
+    padding: 5px 10px;
+    border-radius: 6px;
+}
+.warning-log {
+    color: #856404;
+    background-color: #fff3cd;
+    padding: 5px 10px;
+    border-radius: 6px;
+}
+.error-log {
+    color: #721c24;
+    background-color: #f8d7da;
+    padding: 5px 10px;
+    border-radius: 6px;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# =====================================================================
+# TÍTULO
+# =====================================================================
+st.title("🧠 Automatizador de Notas Fiscais PDF")
+
 
 # pequenas variáveis de estilo (corporativo claro)
 PRIMARY = "#0f4c81"   # azul petróleo
