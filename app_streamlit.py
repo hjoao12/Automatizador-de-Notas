@@ -19,7 +19,33 @@ from dotenv import load_dotenv
 # =====================================================================
 load_dotenv()
 st.set_page_config(page_title="Automatizador de Notas", page_icon="🧾", layout="wide")
-st.title("🧠 Automatizador de Notas Fiscais PDF")
+st.title("🧠 Automatizador de Notas Fiscais PDF — Painel Corporativo")
+
+# pequenas variáveis de estilo (corporativo claro)
+PRIMARY = "#0f4c81"   # azul petróleo
+ACCENT = "#6fb3b8"    # verde-menta claro (agridoce suave)
+BG = "#F7FAFC"
+CARD_BG = "#FFFFFF"
+TEXT_MUTED = "#6b7280"
+WARN = "#f6c85f"      # amarelo suave para aviso
+ERROR = "#e76f51"     # uso raro (evitar vermelho dominante)
+
+# CSS para deixar o visual corporativo claro e organizado
+st.markdown(f"""
+    <style>
+      :root {{ --primary: {PRIMARY}; --accent: {ACCENT}; --bg: {BG}; --card: {CARD_BG}; --muted:{TEXT_MUTED}; --warn:{WARN}; }}
+      .stApp {{ background: var(--bg); color: #0b1220; }}
+      .card {{ background: var(--card); padding: 14px; border-radius: 8px; box-shadow: 0 6px 18px rgba(15,76,129,0.06); margin-bottom: 12px; }}
+      .title-small {{ color: var(--primary); font-weight: 600; }}
+      .muted {{ color: var(--muted); font-size: 13px; }}
+      .log-ok {{ color: #0b8457; font-weight: 600; }}
+      .log-warn {{ color: var(--warn); font-weight: 600; }}
+      .top-actions { display:flex; gap:10px; align-items:center;}
+      .small-note { font-size:13px; color:var(--muted); }
+      .file-row { padding:10px 8px; border-radius:6px; background: linear-gradient(180deg, rgba(15,76,129,0.02), transparent); margin-bottom:6px; }
+      button[title="download-btn"] { background:var(--accent) !important; }
+    </style>
+""", unsafe_allow_html=True)
 
 TEMP_FOLDER = Path("./temp")
 os.makedirs(TEMP_FOLDER, exist_ok=True)
@@ -37,7 +63,14 @@ if not GEMINI_API_KEY:
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(MODEL_NAME)
-st.success("✅ Google Gemini configurado com sucesso!")
+
+st.markdown("<div class='muted'>Conectando ao modelo...</div>", unsafe_allow_html=True)
+try:
+    # Apenas para checar; não chama geração
+    _ = model.name
+    st.success("✅ Google Gemini configurado.")
+except Exception:
+    st.warning("⚠️ Problema ao conectar com Gemini — verifique a variável de ambiente GOOGLE_API_KEY.")
 
 # =====================================================================
 # NORMALIZAÇÃO E SUBSTITUIÇÕES
@@ -69,15 +102,11 @@ def _normalizar_texto(s: str) -> str:
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
-
     if "SABARA" in nome_norm:
         return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
-
     for padrao, substituto in SUBSTITUICOES_FIXAS.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
-
-    # default: normalize and replace spaces by underscore (upper case)
     return re.sub(r"\s+", "_", nome_norm)
 
 def limpar_emitente(nome: str) -> str:
@@ -115,7 +144,6 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
             )
             tempo = round(time.time() - start, 2)
             texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
-            # defensiva: garantir dict
             try:
                 dados = json.loads(texto)
             except Exception:
@@ -133,56 +161,80 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
     return {"error": "Falha máxima de tentativas"}, False, 0
 
 # =====================================================================
-# UI: Upload e Processamento (uma vez)
+# Upload e Processamento (mantém painel de progresso + logs coloridos)
 # =====================================================================
-st.subheader("📎 Faça upload de um ou mais arquivos PDF")
-uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True)
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown("### 📎 Enviar PDFs e processar (uma vez)")
+uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True, key="uploader")
+col_up_a, col_up_b = st.columns([1,1])
+with col_up_a:
+    process_btn = st.button("🚀 Processar PDFs")
+with col_up_b:
+    clear_session = st.button("♻️ Limpar sessão (apagar temporários)")
 
-if uploaded_files and st.button("🚀 Processar PDFs"):
-    # prepara sessão
+st.markdown("</div>", unsafe_allow_html=True)
+
+if clear_session:
+    # remove temp folder contents and reset session state
+    if "session_folder" in st.session_state:
+        try:
+            shutil.rmtree(st.session_state["session_folder"])
+        except Exception:
+            pass
+    for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta"]:
+        if k in st.session_state:
+            del st.session_state[k]
+    st.success("Sessão limpa.")
+    st.experimental_rerun()
+
+if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
 
-    # lemos arquivos 1x
+    # read all files once
     arquivos = []
     for f in uploaded_files:
-        content = f.read()
-        arquivos.append({"name": f.name, "bytes": content})
+        try:
+            b = f.read()
+            arquivos.append({"name": f.name, "bytes": b})
+        except Exception:
+            st.warning(f"Erro ao ler {f.name}, ignorado.")
 
-    # conta páginas
+    # count pages
     total_paginas = 0
     for a in arquivos:
         try:
             r = PdfReader(io.BytesIO(a["bytes"]))
             total_paginas += len(r.pages)
         except Exception:
-            st.warning(f"Arquivo {a['name']} inválido — será ignorado.")
+            st.warning(f"Arquivo inválido: {a['name']}")
 
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
-    prompt = (
-        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
-        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
-    )
 
-    agrupados_bytes = {}   # chave (numero, emitente) -> list de page bytes
-    resultados_meta = []   # lista de dicts com info (arquivo_origem, pagina, emitente_detectado, numero_detectado, status)
-
+    # prepare structures
+    agrupados_bytes = {}
+    resultados_meta = []
+    processed_logs = []
     progresso = 0
     progress_bar = st.progress(0.0)
     progresso_text = st.empty()
     start_all = time.time()
+
+    prompt = (
+        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
+        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+    )
 
     for a in arquivos:
         name = a["name"]
         try:
             reader = PdfReader(io.BytesIO(a["bytes"]))
         except Exception:
-            st.warning(f"Não foi possível ler {name}, pulando.")
+            processed_logs.append((name, 0, "ERRO_LEITURA"))
             continue
 
         for idx, page in enumerate(reader.pages):
-            # escreve página isolada em bytes
             b = io.BytesIO()
             w = PdfWriter()
             w.add_page(page)
@@ -190,10 +242,12 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
             b.seek(0)
 
             dados, ok, tempo = chamar_gemini_retry(model, prompt, b)
+            page_label = f"{name} (pág {idx+1})"
             if not ok or "error" in dados:
+                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados))))
                 progresso += 1
-                progresso_text.text(f"{name} pág {idx+1} — ERRO IA ({dados.get('error','unknown')})")
                 progress_bar.progress(min(progresso/total_paginas, 1.0))
+                progresso_text.markdown(f"<span class='log-warn'>⚠️ {page_label} — ERRO IA</span>", unsafe_allow_html=True)
                 resultados_meta.append({
                     "arquivo_origem": name,
                     "pagina": idx+1,
@@ -214,6 +268,7 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
             key = (numero, emitente)
             agrupados_bytes.setdefault(key, []).append(b.getvalue())
 
+            processed_logs.append((page_label, tempo, "OK", f"{numero} / {emitente}"))
             resultados_meta.append({
                 "arquivo_origem": name,
                 "pagina": idx+1,
@@ -225,10 +280,11 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
 
             progresso += 1
             progress_bar.progress(min(progresso/total_paginas, 1.0))
-            progresso_text.text(f"{name} pág {idx+1} — OK ({tempo:.2f}s)")
+            progresso_text.markdown(f"<span class='log-ok'>✅ {page_label} — OK ({tempo:.2f}s)</span>", unsafe_allow_html=True)
 
-    # gera PDFs finais por grupo (numero+emitente)
+    # write final grouped pdfs to session folder
     resultados = []
+    files_meta = {}
     for (numero, emitente), pages_bytes in agrupados_bytes.items():
         if not numero or numero == "0":
             continue
@@ -250,192 +306,185 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
             "emitente": emitente,
             "pages": len(pages_bytes)
         })
+        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": len(pages_bytes)}
 
-    # salva no session_state para evitar reprocessar
+    # persist in session_state
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
-    st.session_state["grupos"] = {"Sem Grupo": [r["file"] for r in resultados]}
     st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
+    st.session_state["processed_logs"] = processed_logs
+    st.session_state["files_meta"] = files_meta
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
-    st.rerun()  # recarrega para mostrar a área de gerenciamento
+    st.rerun()
 
 # =====================================================================
-# GERENCIAMENTO SIMPLIFICADO (selecionar + Agrupar Selecionadas)
+# PAINEL CORPORATIVO (SEM GRUPOS) - seleção múltipla + ações no topo
 # =====================================================================
 if "resultados" in st.session_state:
-    st.subheader("🗂️ Gerenciamento das Notas — Simples e Intuitivo")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 📋 Gerenciamento — selecione e aplique ações")
     resultados = st.session_state["resultados"]
     session_folder = Path(st.session_state["session_folder"])
-    grupos = st.session_state.get("grupos", {"Sem Grupo": [r["file"] for r in resultados]})
     novos_nomes = st.session_state.get("novos_nomes", {r["file"]: r["file"] for r in resultados})
+    files_meta = st.session_state.get("files_meta", {})
 
-    st.markdown("Use a caixa abaixo para **selecionar notas**. Depois escolha uma ação: **Agrupar Selecionadas**, **Remover Selecionadas do Grupo** ou **Excluir Selecionadas**.")
-    st.markdown("Você também pode editar o nome final de cada nota na lista abaixo.")
-
-    # lista de arquivos disponíveis (ordem)
-    all_files = [r["file"] for r in resultados]
-
-    # show a simple table-like view with editable names (text_inputs)
-    st.markdown("### ✏️ Nomes finais (edite conforme necessário)")
-    for f in all_files:
-        col1, col2, col3 = st.columns([5,2,1])
-        with col1:
-            novos_nomes[f] = st.text_input(f"Arquivo: {f}", novos_nomes.get(f, f), key=f"rename_{f}")
-        with col2:
-            # show meta info
-            meta = next((r for r in resultados if r["file"]==f), {})
-            st.text(f"{meta.get('emitente','-')} / {meta.get('numero','-')}")
-        with col3:
-            grp_label = next((g for g, files in grupos.items() if f in files), "Sem Grupo")
-            st.text(grp_label)
-
-    st.session_state["novos_nomes"] = novos_nomes
-
-    st.markdown("---")
-    st.markdown("### ✅ Seleção e ações em massa")
-    selecionadas = st.multiselect("Selecione as notas para a ação:", options=all_files, default=[])
-
-    col_a, col_b, col_c = st.columns([2,2,2])
-    with col_a:
-        group_name = st.text_input("Nome do grupo para agrupar (ex: FATURAS_JUL)", key="group_name_input")
-        if st.button("➕ Agrupar Selecionadas"):
-            if not selecionadas:
-                st.warning("Nenhuma nota selecionada.")
+    # Top action bar: filtro, busca, ações
+    col1, col2, col3, col4 = st.columns([3,2,2,2])
+    with col1:
+        q = st.text_input("🔎 Buscar arquivo ou emitente", value="", placeholder="parte do nome, emitente ou número")
+    with col2:
+        sort_by = st.selectbox("Ordenar por", ["Nome (A-Z)", "Nome (Z-A)", "Número (asc)", "Número (desc)"], index=0)
+    with col3:
+        show_logs = st.checkbox("Mostrar logs detalhados", value=False)
+    with col4:
+        # action buttons
+        if st.button("⬇️ Baixar Selecionadas"):
+            sel = st.session_state.get("selected_files", [])
+            if not sel:
+                st.warning("Nenhuma nota selecionada para download.")
             else:
-                target = group_name.strip() or f"Grupo_{int(time.time())}"
-                if target not in grupos:
-                    grupos[target] = []
-                # move selecionadas para target (removendo de qualquer outro grupo)
-                for s in selecionadas:
-                    for g, fl in grupos.items():
-                        if s in fl:
-                            fl.remove(s)
-                    grupos[target].append(s)
-                st.session_state["grupos"] = grupos
-                st.success(f"{len(selecionadas)} nota(s) agrupada(s) em '{target}'.")
-    with col_b:
-        if st.button("↩️ Remover Selecionadas do Grupo (Mover para Sem Grupo)"):
-            if not selecionadas:
-                st.warning("Nenhuma nota selecionada.")
-            else:
-                for s in selecionadas:
-                    for g, fl in grupos.items():
-                        if s in fl:
-                            fl.remove(s)
-                grupos.setdefault("Sem Grupo", [])
-                grupos["Sem Grupo"].extend(selecionadas)
-                # dedupe
-                grupos["Sem Grupo"] = list(dict.fromkeys(grupos["Sem Grupo"]))
-                st.session_state["grupos"] = grupos
-                st.success(f"{len(selecionadas)} nota(s) movida(s) para 'Sem Grupo'.")
-    with col_c:
+                # create zip with selected
+                mem = io.BytesIO()
+                with zipfile.ZipFile(mem, "w") as zf:
+                    for f in sel:
+                        src = session_folder / f
+                        if src.exists():
+                            arcname = novos_nomes.get(f, f)
+                            zf.write(src, arcname=arcname)
+                mem.seek(0)
+                st.download_button("⬇️ Clique novamente para confirmar download", data=mem, file_name="selecionadas.zip", mime="application/zip")
         if st.button("🗑️ Excluir Selecionadas"):
-            if not selecionadas:
-                st.warning("Nenhuma nota selecionada.")
+            sel = st.session_state.get("selected_files", [])
+            if not sel:
+                st.warning("Nenhuma nota selecionada para exclusão.")
             else:
-                for s in selecionadas:
-                    # remove from groups
-                    for g, fl in list(grupos.items()):
-                        if s in fl:
-                            fl.remove(s)
-                    # remove physical file
-                    src = session_folder / s
+                count = 0
+                for f in sel:
+                    src = session_folder / f
                     try:
                         if src.exists():
                             src.unlink()
                     except Exception:
                         pass
-                    # remove from resultados list
-                    st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != s]
-                    # remove name entry
-                    if s in st.session_state.get("novos_nomes", {}):
-                        st.session_state["novos_nomes"].pop(s, None)
-                st.session_state["grupos"] = grupos
-                st.success(f"{len(selecionadas)} nota(s) excluída(s).")
+                    # remove from resultados
+                    st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != f]
+                    if f in st.session_state.get("novos_nomes", {}):
+                        st.session_state["novos_nomes"].pop(f, None)
+                    if f in st.session_state.get("files_meta", {}):
+                        st.session_state["files_meta"].pop(f, None)
+                    count += 1
+                st.success(f"{count} arquivo(s) excluído(s).")
+                st.experimental_rerun()
 
-    st.markdown("---")
-    st.markdown("### 📂 Grupos existentes (clique para expandir)")
-    # show groups and contents
-    for gname, files in grupos.items():
-        with st.expander(f"{gname} — {len(files)} notas", expanded=False):
-            if not files:
-                st.write("_(vazio)_")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # Build visible list filtered/search/sorted
+    visible = resultados.copy()
+    if q:
+        q_up = q.strip().upper()
+        visible = [r for r in visible if q_up in r["file"].upper() or q_up in r["emitente"].upper() or q_up in r["numero"]]
+    if sort_by == "Nome (A-Z)":
+        visible.sort(key=lambda x: x["file"])
+    elif sort_by == "Nome (Z-A)":
+        visible.sort(key=lambda x: x["file"], reverse=True)
+    elif sort_by == "Número (asc)":
+        visible.sort(key=lambda x: int(x["numero"]) if x["numero"].isdigit() else 0)
+    else:
+        visible.sort(key=lambda x: int(x["numero"]) if x["numero"].isdigit() else 0, reverse=True)
+
+    # display table-like with selection checkboxes and inline rename
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 🗂 Notas processadas")
+    # remember selected files across reruns
+    if "selected_files" not in st.session_state:
+        st.session_state["selected_files"] = []
+
+    # we'll show simple table: checkbox | filename (editable) | meta | actions
+    for r in visible:
+        fname = r["file"]
+        meta = files_meta.get(fname, {})
+        cols = st.columns([0.06, 0.55, 0.25, 0.14])
+        # checkbox - maintain selection state
+        checked = fname in st.session_state.get("selected_files", [])
+        cb = cols[0].checkbox("", value=checked, key=f"cb_{fname}")
+        # handle selection persistence
+        if cb and fname not in st.session_state["selected_files"]:
+            st.session_state["selected_files"].append(fname)
+        if (not cb) and fname in st.session_state["selected_files"]:
+            st.session_state["selected_files"].remove(fname)
+
+        # editable name
+        novos_nomes[fname] = cols[1].text_input(label=fname, value=novos_nomes.get(fname, fname), key=f"rename_input_{fname}")
+
+        # meta column
+        emit = meta.get("emitente", r.get("emitente", "-"))
+        num = meta.get("numero", r.get("numero", "-"))
+        cols[2].markdown(f"<div class='small-note'>{emit}  •  Nº {num}  •  {r.get('pages',1)} pág(s)</div>", unsafe_allow_html=True)
+
+        # actions dropdown simulation: small selectbox of actions per row
+        action = cols[3].selectbox("", options=["...", "Remover (mover p/ lixeira)", "Baixar este arquivo"], key=f"action_{fname}", index=0)
+        if action == "Remover (mover p/ lixeira)":
+            # remove file
+            src = session_folder / fname
+            try:
+                if src.exists():
+                    src.unlink()
+            except Exception:
+                pass
+            st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != fname]
+            if fname in st.session_state.get("novos_nomes", {}):
+                st.session_state["novos_nomes"].pop(fname, None)
+            st.success(f"{fname} removido.")
+            st.experimental_rerun()
+        elif action == "Baixar este arquivo":
+            src = session_folder / fname
+            if src.exists():
+                with open(src, "rb") as ff:
+                    data = ff.read()
+                st.download_button(f"⬇️ Baixar {fname}", data=data, file_name=novos_nomes.get(fname, fname), mime="application/pdf")
             else:
-                for f in files:
-                    meta = next((r for r in resultados if r["file"]==f), {})
-                    cols = st.columns([6,2,1])
-                    with cols[0]:
-                        st.text(f)
-                    with cols[1]:
-                        st.text(f"{meta.get('emitente','-')}")
-                    with cols[2]:
-                        if st.button("Remover", key=f"rm_{gname}_{f}"):
-                            # move to Sem Grupo
-                            grupos[gname].remove(f)
-                            grupos.setdefault("Sem Grupo", []).append(f)
-                            st.session_state["grupos"] = grupos
-                            st.experimental_rerun()
+                st.warning("Arquivo não encontrado.")
+            # reset action selector back to ...
+            st.session_state[f"action_{fname}"] = "..."
+        st.markdown("<hr/>", unsafe_allow_html=True)
 
-    st.markdown("---")
-    # group rename / delete
-    st.markdown("### ⚙️ Gerenciar grupos")
-    col1, col2 = st.columns(2)
-    with col1:
-        sel_group = st.selectbox("Selecionar grupo para renomear:", [g for g in grupos.keys() if g!="Sem Grupo"], index=0 if any(g!="Sem Grupo" for g in grupos.keys()) else 0)
-        new_name_for_group = st.text_input("Novo nome do grupo:", key="rename_group_input")
-        if st.button("Renomear grupo"):
-            if sel_group and new_name_for_group:
-                grupos[new_name_for_group] = grupos.pop(sel_group)
-                st.session_state["grupos"] = grupos
-                st.success(f"Grupo '{sel_group}' renomeado para '{new_name_for_group}'.")
-    with col2:
-        del_group = st.selectbox("Selecionar grupo para excluir (moverá as notas para 'Sem Grupo'):", [g for g in grupos.keys() if g!="Sem Grupo"], index=0 if any(g!="Sem Grupo" for g in grupos.keys()) else 0)
-        if st.button("Excluir grupo"):
-            if del_group and del_group in grupos:
-                itens = grupos.pop(del_group)
-                grupos.setdefault("Sem Grupo", []).extend(itens)
-                # dedupe
-                grupos["Sem Grupo"] = list(dict.fromkeys(grupos["Sem Grupo"]))
-                st.session_state["grupos"] = grupos
-                st.success(f"Grupo '{del_group}' excluído e suas notas movidas para 'Sem Grupo'.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.session_state["grupos"] = grupos
+    # show logs if requested
+    if show_logs and st.session_state.get("processed_logs"):
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("### 📝 Logs de processamento (últimas páginas)")
+        for entry in st.session_state["processed_logs"][-200:]:
+            label, t, status, info = (entry + ("", ""))[:4]
+            if status == "OK":
+                st.markdown(f"<div class='log-ok'>✅ {label} — {info} — {t:.2f}s</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div class='log-warn'>⚠️ {label} — {info}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Persist edited names
     st.session_state["novos_nomes"] = novos_nomes
 
     st.markdown("---")
-    # Final: gerar ZIP com nomes editados e grupos
-    if st.button("📦 Baixar ZIP final (respeita agrupamentos e nomes)"):
-        memory_zip = io.BytesIO()
-        with zipfile.ZipFile(memory_zip, "w") as zf:
-            for gname, files in grupos.items():
-                if gname == "Sem Grupo":
-                    for fname in files:
-                        arcname = novos_nomes.get(fname, fname)
-                        src = session_folder / fname
-                        if src.exists():
-                            zf.write(src, arcname=arcname)
-                else:
-                    # criar PDF agrupado por esse grupo
-                    writer = PdfWriter()
-                    total_pages = 0
-                    for fname in files:
-                        src = session_folder / fname
-                        if not src.exists():
-                            continue
-                        try:
-                            r = PdfReader(src)
-                            for p in r.pages:
-                                writer.add_page(p)
-                                total_pages += 1
-                        except Exception:
-                            continue
-                    if total_pages > 0:
-                        grouped_name = f"{gname}.pdf"
-                        tmp_path = session_folder / grouped_name
-                        with open(tmp_path, "wb") as of:
-                            writer.write(of)
-                        # use group name as arcname (but allow override via novos_nomes if user edited)
-                        zf.write(tmp_path, arcname=novos_nomes.get(grouped_name, grouped_name))
-        memory_zip.seek(0)
-        st.download_button("⬇️ Baixar notas finais (ZIP)", data=memory_zip, file_name="notas_processadas.zip", mime="application/zip")
+    # Final download: all (respect novos_nomes)
+    col_dl_a, col_dl_b = st.columns([1,3])
+    with col_dl_a:
+        if st.button("📦 Baixar tudo (ZIP)"):
+            mem = io.BytesIO()
+            with zipfile.ZipFile(mem, "w") as zf:
+                for r in st.session_state.get("resultados", []):
+                    fname = r["file"]
+                    src = session_folder / fname
+                    if src.exists():
+                        zf.write(src, arcname=st.session_state.get("novos_nomes", {}).get(fname, fname))
+            mem.seek(0)
+            st.download_button("⬇️ Clique para baixar (ZIP)", data=mem, file_name="notas_processadas.zip", mime="application/zip")
+    with col_dl_b:
+        st.markdown("<div class='small-note'>Dica: edite nomes na lista e use 'Baixar Selecionadas' para baixar apenas o que precisar.</div>", unsafe_allow_html=True)
+
+# =====================================================================
+# caso não haja resultados ainda
+# =====================================================================
+else:
+    st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
