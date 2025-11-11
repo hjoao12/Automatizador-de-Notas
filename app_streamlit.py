@@ -1,10 +1,10 @@
-# app_streamlit.py
 import os
 import io
 import time
 import json
 import zipfile
 import uuid
+import shutil
 import unicodedata
 import re
 from pathlib import Path
@@ -14,9 +14,9 @@ from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
 from dotenv import load_dotenv
 
-# ----------------------------
-# Config
-# ----------------------------
+# =====================================================================
+# CONFIGURAÇÃO INICIAL
+# =====================================================================
 load_dotenv()
 st.set_page_config(page_title="Automatizador de Notas", page_icon="🧾", layout="wide")
 st.title("🧠 Automatizador de Notas Fiscais PDF")
@@ -24,6 +24,7 @@ st.title("🧠 Automatizador de Notas Fiscais PDF")
 TEMP_FOLDER = Path("./temp")
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
+MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
 MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
@@ -31,34 +32,31 @@ MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.0-flash")
 
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GEMINI_API_KEY:
-    st.error("❌ GOOGLE_API_KEY não encontrada.")
+    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
     st.stop()
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(MODEL_NAME)
+st.success("✅ Google Gemini configurado com sucesso!")
 
-# ----------------------------
-# Padronizações
-# ----------------------------
-SUBSTITUICOES_NOMES = {
+# =====================================================================
+# NORMALIZAÇÃO E SUBSTITUIÇÕES
+# =====================================================================
+SUBSTITUICOES_FIXAS = {
     "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
     "COMPANHIA DE AGUA E ESGOTOS DA PARAÍBA": "CAGEPA",
     "COMPANHIA DE AGUA E ESGOTO DA PARAIBA": "CAGEPA",
     "CIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
     "COMPANHIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
     "CAGECE": "CAGECE",
-    "SABARA QUIMICOS E INGREDIENTES SA": "SABARA",
-    "SABARA QUIMICOS E INGREDIENTES LTDA": "SABARA",
-    "SABARÁ QUIMICOS E INGREDIENTES SA": "SABARA",
-    "SABARÁ QUIMICOS E INGREDIENTES LTDA": "SABARA",
-    "TRANSPORTE LIDA LTDA": "TRANSPORTE_LIDA",
     "TRANSPORTE LIDA": "TRANSPORTE_LIDA",
+    "TRANSPORTE LIDA LTDA": "TRANSPORTE_LIDA",
     "TRANSPORTELIDA": "TRANSPORTE_LIDA",
-    "UNIPAR CARBLOCLORO LTDA": "UNIPAR_CARBOCLORO",
-    "UNIPAR CARBLOCLORO S A": "UNIPAR_CARBOCLORO",
-    "UNIPAR CARBOCLORO": "UNIPAR_CARBOCLORO",
-    "EXPRESS TCM LTDA": "EXPRESS_TCM",
+    "UNIPAR CARBOCLORO": "UNIPAR_CARBLOCLORO",
+    "UNIPAR CARBOCLORO LTDA": "UNIPAR_CARBLOCLORO",
+    "UNIPAR_CARBLOCLORO LTDA": "UNIPAR_CARBLOCLORO",
     "EXPRESS TCM": "EXPRESS_TCM",
+    "EXPRESS TCM LTDA": "EXPRESS_TCM",
 }
 
 def _normalizar_texto(s: str) -> str:
@@ -66,68 +64,43 @@ def _normalizar_texto(s: str) -> str:
         return ""
     s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("ASCII")
     s = re.sub(r"[^A-Z0-9 ]+", " ", s.upper())
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    return re.sub(r"\s+", " ", s).strip()
 
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
-    cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else ""
-    # Sabará uses city abbreviation SB_CIDADE
-    if "SABARA" in nome_norm and cidade_norm:
-        # only first token of city
-        return f"SB_{cidade_norm.split()[0]}"
-    for padrao, sub in SUBSTITUICOES_NOMES.items():
+    cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
+
+    # Sabará com cidade abreviada
+    if "SABARA" in nome_norm:
+        if cidade_norm:
+            return f"SB_{cidade_norm}"
+        return "SB"
+
+    # Substituições fixas
+    for padrao, substituto in SUBSTITUICOES_FIXAS.items():
         if _normalizar_texto(padrao) in nome_norm:
-            return sub
-    # default: replace spaces by underscore
-    return re.sub(r"\s+", "_", nome_norm)
+            return substituto
+
+    return nome_norm
 
 def limpar_emitente(nome: str) -> str:
     if not nome:
         return "SEM_NOME"
     nome = unicodedata.normalize("NFKD", nome).encode("ASCII", "ignore").decode("ASCII")
-    nome = "".join(c if c.isalnum() else "_" for c in nome)
-    return re.sub(r"_+", "_", nome).strip("_")
+    nome = re.sub(r"[^A-Z0-9_]+", "_", nome.upper())
+    while "__" in nome:
+        nome = nome.replace("__", "_")
+    return nome.strip("_")
 
-def limpar_numero(num_raw: str) -> str:
-    if not num_raw:
+def limpar_numero(numero: str) -> str:
+    if not numero:
         return "0"
-    # extract digits sequence that is the invoice number (first long digits group)
-    # keep fallback to remove punctuation
-    m = re.search(r"(\d{3,})", str(num_raw))
-    if m:
-        return m.group(1).lstrip("0") or "0"
-    cleaned = re.sub(r"[^\d]", "", str(num_raw))
-    return cleaned.lstrip("0") or "0"
+    numero = re.sub(r"[.\-,/ ]", "", numero)
+    return numero.lstrip("0") or "0"
 
-# ----------------------------
-# Extrair parte/total de strings (1/4, 1 de 4, 1-4, (1/4), nº 123/1)
-# returns (part:int, total:int) or None
-# ----------------------------
-def parse_sequencia(text: str):
-    if not text:
-        return None
-    s = str(text).lower()
-    # common patterns: 1/4, 1 de 4, 1 - 4, (1/4)
-    m = re.search(r"(\d{1,3})\s*/\s*(\d{1,3})", s)
-    if not m:
-        m = re.search(r"(\d{1,3})\s+de\s+(\d{1,3})", s)
-    if not m:
-        m = re.search(r"(\d{1,3})\s*-\s*(\d{1,3})", s)
-    if m:
-        try:
-            part = int(m.group(1))
-            total = int(m.group(2))
-            if total >= part >= 1:
-                return (part, total)
-        except:
-            return None
-    # sometimes appears like '1/4 NF 123' or 'NF 123 - 1/4' handled by above
-    return None
-
-# ----------------------------
-# Gemini retry helper
-# ----------------------------
+# =====================================================================
+# RETRY GEMINI
+# =====================================================================
 def calcular_delay(tentativa, error_msg):
     if "retry in" in error_msg.lower():
         try:
@@ -151,19 +124,19 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
             return dados, True, tempo
         except ResourceExhausted as e:
             delay = calcular_delay(tentativa, str(e))
-            st.warning(f"⚠️ Quota excedida. Tentativa {tentativa+1}. Aguardando {delay}s...")
+            st.warning(f"⚠️ Quota excedida (tentativa {tentativa + 1}/{MAX_RETRIES}). Aguardando {delay}s...")
             time.sleep(delay)
         except Exception as e:
             if tentativa < MAX_RETRIES:
                 time.sleep(MIN_RETRY_DELAY)
             else:
                 return {"error": str(e)}, False, 0
-    return {"error": "Máximo de tentativas"}, False, 0
+    return {"error": "Falha máxima de tentativas"}, False, 0
 
-# ----------------------------
-# UI: upload and processing
-# ----------------------------
-st.subheader("📎 Faça upload dos PDFs (várias páginas/partes são aceitas)")
+# =====================================================================
+# INTERFACE STREAMLIT
+# =====================================================================
+st.subheader("📎 Faça upload de um ou mais arquivos PDF")
 uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True)
 
 if uploaded_files and st.button("🚀 Processar PDFs"):
@@ -171,148 +144,99 @@ if uploaded_files and st.button("🚀 Processar PDFs"):
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
 
-    # read files once
-    arquivos = []
-    for f in uploaded_files:
-        content = f.read()
-        arquivos.append({"name": f.name, "bytes": content})
+    resultados = []
+    start_global = time.time()
+    prompt = (
+        "Analise a nota fiscal e extraia emitente, número da nota e cidade. "
+        "Responda SOMENTE em JSON no formato: "
+        "{\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+    )
 
-    # count pages safely
     total_paginas = 0
-    for a in arquivos:
+    for f in uploaded_files:
+        f_bytes = io.BytesIO(f.read())
         try:
-            r = PdfReader(io.BytesIO(a["bytes"]))
-            total_paginas += len(r.pages)
-        except Exception:
-            st.warning(f"Arquivo {a['name']} inválido/oculto — será ignorado.")
-    st.info(f"📄 Total de páginas a processar: {total_paginas}")
-
-    prompt = ("Analise a nota fiscal (DANFE). Extraia emitente, número da nota e, se presente, sequência (ex: 1/4). "
-              "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\",\"sequencia\":\"x/y\"}")
-
-    progresso = 0
-    progress_bar = st.progress(0.0)
-    progresso_text = st.empty()
-
-    # agrupamento: key = (numero, emitente) -> dict with list of page bytes and optional parts info
-    agrup = {}
-
-    resultados = []  # lines for table
-
-    start_time_total = time.time()
-    for a in arquivos:
-        name = a["name"]
-        try:
-            reader = PdfReader(io.BytesIO(a["bytes"]))
-        except Exception:
-            st.warning(f"Não foi possível ler {name}, pulando.")
+            leitor = PdfReader(f_bytes)
+            total_paginas += len(leitor.pages)
+        except:
             continue
 
-        for idx, page in enumerate(reader.pages):
-            # write page to bytes
-            b = io.BytesIO()
-            w = PdfWriter()
-            w.add_page(page)
-            w.write(b)
-            b.seek(0)
+    progress_bar = st.progress(0.0)
+    progresso_texto = st.empty()
+    progresso = 0
 
-            dados, ok, tempo = chamar_gemini_retry(model, prompt, b)
-            seq = None
-            numero_raw = ""
-            emitente_raw = ""
-            cidade_raw = ""
+    agrupados = {}
 
-            if ok and "error" not in dados:
-                emitente_raw = dados.get("emitente", "") or ""
-                numero_raw = dados.get("numero_nota", "") or ""
-                cidade_raw = dados.get("cidade", "") or ""
-                seq_field = dados.get("sequencia") or dados.get("sequencia_nota") or ""
-                seq = parse_sequencia(seq_field) or parse_sequencia(numero_raw) or None
-                numero = limpar_numero(numero_raw)
-                nome_mapeado = substituir_nome_emitente(emitente_raw, cidade_raw)
-                emitente_limpo = limpar_emitente(nome_mapeado)
-                key = (numero, emitente_limpo)
-                if key not in agrup:
-                    agrup[key] = {"pages": [], "parts": set()}
-                agrup[key]["pages"].append(b.getvalue())
-                if seq:
-                    agrup[key]["parts"].add(seq)
-                status = "✅ OK"
-            else:
-                numero = "-"
-                emitente_limpo = "-"
-                status = f"❌ {dados.get('error','erro')}"
+    for file_index, file in enumerate(uploaded_files):
+        file.seek(0)
+        pdf_bytes = io.BytesIO(file.read())
+        try:
+            leitor = PdfReader(pdf_bytes)
+        except:
+            continue
+
+        for i, page in enumerate(leitor.pages):
+            start_page_time = time.time()
+            page_stream = io.BytesIO()
+            writer = PdfWriter()
+            writer.add_page(page)
+            writer.write(page_stream)
+            page_stream.seek(0)
+
+            dados, ok, tempo_pagina = chamar_gemini_retry(model, prompt, page_stream)
+            if not ok or "error" in dados:
+                progresso += 1
+                continue
+
+            emitente_raw = dados.get("emitente", "") or ""
+            numero_raw = dados.get("numero_nota", "") or ""
+            cidade_raw = dados.get("cidade", "") or ""
+
+            numero_limpo = limpar_numero(numero_raw)
+            nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
+            emitente_limpo = limpar_emitente(nome_map)
+            chave = (numero_limpo, emitente_limpo)
+
+            if chave not in agrupados:
+                agrupados[chave] = []
+            agrupados[chave].append(page_stream.getvalue())
 
             progresso += 1
             progress_bar.progress(min(progresso / total_paginas, 1.0))
-            progresso_text.text(f"{name} pág {idx+1} — {status} ({tempo:.2f}s)")
+            progresso_texto.markdown(f"⏱ Página {progresso}/{total_paginas} processada em {tempo_pagina:.2f}s")
 
-            resultados.append({
-                "arquivo_origem": name,
-                "pagina": idx+1,
-                "emitente_detectado": emitente_raw if ok else "-",
-                "numero_detectado": numero_raw if ok else "-",
-                "sequencia": f"{seq[0]}/{seq[1]}" if seq else "-",
-                "status": status,
-                "tempo_s": round(tempo,2)
-            })
-
-    # build final files from agrup
-    arquivos_finais = []
-    for (numero, emitente), info in agrup.items():
-        if not numero or numero == "0":
-            # skip invalid
-            continue
+    # Juntar PDFs por grupo
+    for (numero, emitente), paginas in agrupados.items():
         writer = PdfWriter()
-        for page_bytes in info["pages"]:
-            try:
-                r = PdfReader(io.BytesIO(page_bytes))
-                for p in r.pages:
-                    writer.add_page(p)
-            except Exception:
-                # ignore page if can't be read
-                continue
-        nome_final = f"DOC {numero}_{emitente}.pdf"
-        path_final = session_folder / nome_final
-        with open(path_final, "wb") as f_out:
+        for p_bytes in paginas:
+            r = PdfReader(io.BytesIO(p_bytes))
+            writer.add_page(r.pages[0])
+        nome_pdf = f"DOC {numero}_{emitente}.pdf"
+        with open(session_folder / nome_pdf, "wb") as f_out:
             writer.write(f_out)
-        arquivos_finais.append({
-            "Novo Nome": nome_final,
-            "Emitente": emitente,
-            "Número": numero,
-            "Total Páginas": len(info["pages"]),
-            "Sequências Detectadas": len(info["parts"]) if info["parts"] else 0
-        })
+        resultados.append({"novo": nome_pdf, "numero": numero, "emitente": emitente, "paginas": len(paginas)})
 
-    # Show summary and allow manual edits
-    st.success(f"Processamento terminado em {round(time.time() - start_time_total,2)}s — {len(arquivos_finais)} notas geradas.")
-    st.subheader("🔎 Resultados — verifique e edite os nomes finais antes de baixar")
-    if arquivos_finais:
-        df_edit = st.data_editor(arquivos_finais, num_rows="dynamic", use_container_width=True, key="editor_final")
-        # prepare zip using edited names
-        if st.button("📦 Gerar ZIP com nomes editados"):
-            memory_zip = io.BytesIO()
-            with zipfile.ZipFile(memory_zip, "w") as zf:
-                for row in df_edit:
-                    nome = row.get("Novo Nome")
-                    src = session_folder / row.get("Novo Nome")
-                    # if user changed the name, find the original file by matching number+emitente fallback
-                    if not src.exists():
-                        # attempt match by number+emitente
-                        numero = row.get("Número")
-                        emitente = row.get("Emitente")
-                        candidate = session_folder / f"DOC {numero}_{emitente}.pdf"
-                        if candidate.exists():
-                            src = candidate
-                        else:
-                            st.warning(f"Arquivo {nome} não encontrado — pulando.")
-                            continue
-                    zf.write(src, arcname=nome)
-            memory_zip.seek(0)
-            st.download_button("⬇️ Baixar ZIP final", data=memory_zip, file_name="notas_processadas.zip", mime="application/zip")
-    else:
-        st.info("Nenhuma nota processada.")
+    # Editor de renomeação antes do download
+    st.subheader("✏️ Renomeie antes de baixar")
+    novos_nomes = {}
+    for res in resultados:
+        novo_nome = st.text_input(f"{res['emitente']} (DOC {res['numero']})", res['novo'])
+        novos_nomes[res['novo']] = novo_nome
 
-    # optional: cleanup session folder after download manually or here
-    # shutil.rmtree(session_folder)  # uncomment if you want auto-cleanup
-    st.dataframe(resultados)
+    # Compactar para download
+    memory_zip = io.BytesIO()
+    with zipfile.ZipFile(memory_zip, "w") as zf:
+        for f in os.listdir(session_folder):
+            nome_final = novos_nomes.get(f, f)
+            zf.write(session_folder / f, arcname=nome_final)
+    memory_zip.seek(0)
+
+    tempo_total = round(time.time() - start_global, 2)
+    st.success(f"🏁 Processamento concluído em {tempo_total}s.")
+
+    st.download_button(
+        "⬇️ Baixar arquivos processados",
+        data=memory_zip,
+        file_name="notas_processadas.zip",
+        mime="application/zip"
+    )
