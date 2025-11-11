@@ -14,24 +14,70 @@ from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
 from dotenv import load_dotenv
 
+# =====================================================================
+# CONFIGURAÇÃO INICIAL
+# =====================================================================
 load_dotenv()
 st.set_page_config(page_title="Automatizador de Notas Fiscais", page_icon="🧾", layout="wide")
 
-# CSS corporativo claro (seguro)
+# ======= CSS Corporativo Claro (corrigido, seguro e completo) =======
 st.markdown("""
 <style>
-body { background-color: #f8f9fa; color: #212529; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
-[data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e9ecef; }
-h1, h2, h3, h4 { color: #0f4c81; }
-div.stButton > button { background-color: #0f4c81; color: white; border-radius: 8px; border: none; font-weight: 500; }
-div.stButton > button:hover { background-color: #0b3a5a; }
-.stProgress > div > div > div > div { background-color: #28a745 !important; }
-.success-log { color: #155724; background-color: #d4edda; padding: 6px 10px; border-radius: 6px; }
-.warning-log { color: #856404; background-color: #fff3cd; padding: 6px 10px; border-radius: 6px; }
-.error-log { color: #721c24; background-color: #f8d7da; padding: 6px 10px; border-radius: 6px; }
-.top-actions { display: flex; gap: 10px; align-items: center; }
-.block-container { padding-top: 2rem; }
-.small-note { font-size:13px; color:#6b7280; }
+body {
+  background-color: #f8f9fa;
+  color: #212529;
+  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+}
+[data-testid="stSidebar"] {
+  background-color: #ffffff;
+  border-right: 1px solid #e9ecef;
+}
+h1, h2, h3, h4 {
+  color: #0f4c81;
+}
+div.stButton > button {
+  background-color: #0f4c81;
+  color: white;
+  border-radius: 8px;
+  border: none;
+  font-weight: 500;
+}
+div.stButton > button:hover {
+  background-color: #0b3a5a;
+}
+.stProgress > div > div > div > div {
+  background-color: #28a745 !important;
+}
+.success-log {
+  color: #155724;
+  background-color: #d4edda;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.warning-log {
+  color: #856404;
+  background-color: #fff3cd;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.error-log {
+  color: #721c24;
+  background-color: #f8d7da;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.top-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.block-container {
+  padding-top: 2rem;
+}
+.small-note {
+  font-size:13px;
+  color:#6b7280;
+}
 </style>
 """, unsafe_allow_html=True)
 
