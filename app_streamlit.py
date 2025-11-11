@@ -103,10 +103,10 @@ st.markdown(f"""
       .muted {{ color: var(--muted); font-size: 13px; }}
       .log-ok {{ color: #0b8457; font-weight: 600; }}
       .log-warn {{ color: var(--warn); font-weight: 600; }}
-      .top-actions { display:flex; gap:10px; align-items:center;}
-      .small-note { font-size:13px; color:var(--muted); }
-      .file-row { padding:10px 8px; border-radius:6px; background: linear-gradient(180deg, rgba(15,76,129,0.02), transparent); margin-bottom:6px; }
-      button[title="download-btn"] { background:var(--accent) !important; }
+      .top-actions {{ display:flex; gap:10px; align-items:center;}}
+      .small-note {{ font-size:13px; color:var(--muted); }}
+      .file-row {{ padding:10px 8px; border-radius:6px; background: linear-gradient(180deg, rgba(15,76,129,0.02), transparent); margin-bottom:6px; }}
+      button[title="download-btn"] {{ background:var(--accent) !important; }}
     </style>
 """, unsafe_allow_html=True)
 
