@@ -15,10 +15,6 @@ import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
 from dotenv import load_dotenv
-import openai
-from openai import OpenAI
-import requests
-import base64
 
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
@@ -72,10 +68,6 @@ div.stButton > button:hover {
   padding: 6px 10px;
   border-radius: 6px;
 }
-.provider-gemini { color: #4285F4; }
-.provider-openai { color: #19C37D; }
-.provider-deepseek { color: #0D9276; }
-.provider-claude { color: #FF6B35; }
 .top-actions {
   display: flex;
   gap: 10px;
@@ -138,360 +130,20 @@ class DocumentCache:
 document_cache = DocumentCache()
 
 # =====================================================================
-# SISTEMA MULTI-IA COM FALLBACK - CORRIGIDO
+# CONFIGURAÇÃO GEMINI
 # =====================================================================
-class MultiAIProvider:
-    def __init__(self):
-        self.providers_config = self._setup_providers_config()
-        self.providers = []
-        self.active_provider = None
-        self.stats = {}
-        self._initialize_providers()
-        
-    def _setup_providers_config(self):
-        """Configuração base dos provedores - sem inicialização"""
-        providers_config = []
-        
-        # 1. Google Gemini
-        if os.getenv("GOOGLE_API_KEY"):
-            providers_config.append({
-                'name': 'Gemini',
-                'type': 'gemini',
-                'priority': 1,
-                'enabled': True,
-                'api_key': os.getenv("GOOGLE_API_KEY"),
-                'model_name': os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
-            })
-        
-        # 2. OpenAI ChatGPT
-        if os.getenv("OPENAI_API_KEY"):
-            providers_config.append({
-                'name': 'OpenAI',
-                'type': 'openai',
-                'model': os.getenv("OPENAI_MODEL", "gpt-4o"),
-                'priority': 2,
-                'enabled': True,
-                'api_key': os.getenv("OPENAI_API_KEY")
-            })
-        
-        # 3. DeepSeek
-        if os.getenv("DEEPSEEK_API_KEY"):
-            providers_config.append({
-                'name': 'DeepSeek',
-                'type': 'deepseek',
-                'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-                'priority': 3,
-                'enabled': True,
-                'api_key': os.getenv("DEEPSEEK_API_KEY")
-            })
-        
-        # 4. Anthropic Claude
-        if os.getenv("ANTHROPIC_API_KEY"):
-            providers_config.append({
-                'name': 'Claude',
-                'type': 'claude',
-                'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
-                'priority': 4,
-                'enabled': True,
-                'api_key': os.getenv("ANTHROPIC_API_KEY")
-            })
-        
-        return sorted(providers_config, key=lambda x: x['priority'])
-    
-    def _initialize_providers(self):
-        """Inicializa os provedores baseado na configuração"""
-        self.providers = []
-        
-        for config in self.providers_config:
-            try:
-                provider = config.copy()
-                
-                if config['type'] == 'gemini' and config.get('enabled', True):
-                    genai.configure(api_key=config['api_key'])
-                    provider['model'] = genai.GenerativeModel(config['model_name'])
-                    self.providers.append(provider)
-                    
-                elif config['type'] == 'openai' and config.get('enabled', True):
-                    provider['client'] = OpenAI(api_key=config['api_key'])
-                    self.providers.append(provider)
-                    
-                elif config['type'] == 'deepseek' and config.get('enabled', True):
-                    # Deepseek será inicializado na chamada
-                    self.providers.append(provider)
-                    
-                elif config['type'] == 'claude' and config.get('enabled', True):
-                    # Claude usa requests diretamente
-                    self.providers.append(provider)
-                    
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ {config['name']} falhou na inicialização: {str(e)}")
-        
-        # Inicializar estatísticas
-        for provider in self.providers:
-            self.stats[provider['name']] = {'success': 0, 'errors': 0, 'total_time': 0}
-        
-        if not self.providers:
-            st.error("❌ Nenhum provedor de IA configurado ou habilitado.")
-    
-    def update_provider_status(self, provider_name, enabled):
-        """Atualiza status do provedor e reinicializa"""
-        for config in self.providers_config:
-            if config['name'] == provider_name:
-                config['enabled'] = enabled
-                break
-        self._initialize_providers()
-    
-    def get_enabled_providers(self):
-        """Retorna lista de provedores habilitados"""
-        return [p for p in self.providers if p.get('enabled', True)]
-    
-    def process_pdf_page(self, prompt_instrucao, page_stream, max_retries=2):
-        # Verificar cache primeiro
-        cache_key = document_cache.get_cache_key(page_stream.getvalue(), prompt_instrucao)
-        cached_result = document_cache.get(cache_key)
-        if cached_result and st.session_state.get("use_cache", True):
-            st.sidebar.info("💾 Usando cache")
-            return cached_result['dados'], True, cached_result['tempo'], cached_result['provider']
-        
-        last_error = None
-        enabled_providers = self.get_enabled_providers()
-        
-        if not enabled_providers:
-            return {"error": "Nenhum provedor habilitado"}, False, 0, "Nenhum"
-        
-        for provider in enabled_providers:
-            st.sidebar.info(f"🔄 Tentando com {provider['name']}...")
-            
-            for tentativa in range(max_retries + 1):
-                try:
-                    if provider['type'] == 'gemini':
-                        dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
-                    elif provider['type'] == 'openai':
-                        dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
-                    elif provider['type'] == 'deepseek':
-                        dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
-                    elif provider['type'] == 'claude':
-                        dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
-                    else:
-                        continue
-                    
-                    # Atualizar estatísticas
-                    self.stats[provider['name']]['success'] += 1
-                    self.stats[provider['name']]['total_time'] += tempo
-                    self.active_provider = provider['name']
-                    
-                    # Salvar no cache
-                    document_cache.set(cache_key, {
-                        'dados': dados,
-                        'tempo': tempo,
-                        'provider': provider['name']
-                    })
-                    
-                    return dados, True, tempo, provider['name']
-                        
-                except Exception as e:
-                    last_error = f"{provider['name']}: {str(e)}"
-                    self.stats[provider['name']]['errors'] += 1
-                    
-                    if tentativa < max_retries:
-                        delay = min(3 * (tentativa + 1), 15)
-                        st.sidebar.warning(f"⚠️ {provider['name']} falhou (tentativa {tentativa + 1}), aguardando {delay}s...")
-                        time.sleep(delay)
-                    continue
-        
-        return {"error": f"Todos os provedores falharam. Último erro: {last_error}"}, False, 0, "Nenhum"
-    
-    def _call_gemini(self, provider, prompt, page_stream):
-        start = time.time()
-        resp = provider['model'].generate_content(
-            [prompt, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
-            generation_config={"response_mime_type": "application/json"},
-            request_options={'timeout': 60}
-        )
-        tempo = round(time.time() - start, 2)
-        texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
-        
-        # Verificar se é JSON válido
-        if texto.startswith('{') and texto.endswith('}'):
-            dados = json.loads(texto)
-        else:
-            # Tentar extrair JSON da resposta
-            try:
-                json_match = re.search(r'\{.*\}', texto, re.DOTALL)
-                if json_match:
-                    dados = json.loads(json_match.group())
-                else:
-                    dados = {"error": "Resposta não é JSON válido", "raw_text": texto[:100]}
-            except:
-                dados = {"error": "Falha ao parsear JSON", "raw_text": texto[:100]}
-        
-        return dados, tempo
-    
-    def _call_openai(self, provider, prompt, page_stream):
-        start = time.time()
-        
-        # Codificar PDF em base64 para OpenAI
-        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
-        
-        response = provider['client'].chat.completions.create(
-            model=provider['model'],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:application/pdf;base64,{pdf_base64}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            response_format={"type": "json_object"},
-            timeout=60
-        )
-        
-        tempo = round(time.time() - start, 2)
-        texto = response.choices[0].message.content
-        
-        try:
-            dados = json.loads(texto)
-        except json.JSONDecodeError:
-            # Tentar extrair JSON da resposta
-            try:
-                json_match = re.search(r'\{.*\}', texto, re.DOTALL)
-                if json_match:
-                    dados = json.loads(json_match.group())
-                else:
-                    dados = {"error": "Resposta não é JSON válido", "raw_text": texto[:100]}
-            except:
-                dados = {"error": "Falha ao parsear JSON", "raw_text": texto[:100]}
-        
-        return dados, tempo
-    
-    def _call_deepseek(self, provider, prompt, page_stream):
-        start = time.time()
-        
-        # Inicializar cliente Deepseek
-        client = OpenAI(
-            api_key=provider['api_key'],
-            base_url="https://api.deepseek.com/v1"
-        )
-        
-        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
-        
-        try:
-            response = client.chat.completions.create(
-                model=provider['model'],
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:application/pdf;base64,{pdf_base64}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                response_format={"type": "json_object"},
-                timeout=60
-            )
-            
-            tempo = round(time.time() - start, 2)
-            texto = response.choices[0].message.content
-            
-            try:
-                dados = json.loads(texto)
-            except json.JSONDecodeError:
-                try:
-                    json_match = re.search(r'\{.*\}', texto, re.DOTALL)
-                    if json_match:
-                        dados = json.loads(json_match.group())
-                    else:
-                        dados = {"error": "Resposta não é JSON válido", "raw_text": texto[:100]}
-                except:
-                    dados = {"error": "Falha ao parsear JSON", "raw_text": texto[:100]}
-            
-            return dados, tempo
-            
-        except Exception as e:
-            raise Exception(f"DeepSeek API error: {str(e)}")
-    
-    def _call_claude(self, provider, prompt, page_stream):
-        start = time.time()
-        
-        # Anthropic Claude API
-        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
-        
-        headers = {
-            "x-api-key": provider['api_key'],
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-        
-        data = {
-            "model": provider['model'],
-            "max_tokens": 1000,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": pdf_base64
-                            }
-                        }
-                    ]
-                }
-            ]
-        }
-        
-        response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers=headers,
-            json=data,
-            timeout=60
-        )
-        
-        if response.status_code != 200:
-            raise Exception(f"Claude API error: {response.text}")
-        
-        tempo = round(time.time() - start, 2)
-        result = response.json()
-        texto = result['content'][0]['text']
-        
-        try:
-            dados = json.loads(texto)
-        except json.JSONDecodeError:
-            try:
-                json_match = re.search(r'\{.*\}', texto, re.DOTALL)
-                if json_match:
-                    dados = json.loads(json_match.group())
-                else:
-                    dados = {"error": "Resposta não é JSON válido", "raw_text": texto[:100]}
-            except:
-                dados = {"error": "Falha ao parsear JSON", "raw_text": texto[:100]}
-        
-        return dados, tempo
-    
-    def get_stats(self):
-        return self.stats
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GEMINI_API_KEY:
+    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
+    st.stop()
 
-# Inicializar o multi-IA
-multi_ai = MultiAIProvider()
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
+    st.sidebar.success("✅ Gemini configurado")
+except Exception as e:
+    st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
+    st.stop()
 
 # =====================================================================
 # CONFIGURAÇÕES GERAIS
@@ -507,6 +159,8 @@ os.makedirs(TEMP_FOLDER, exist_ok=True)
 
 MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
+MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 
 # =====================================================================
 # NORMALIZAÇÃO E SUBSTITUIÇÕES
@@ -594,35 +248,50 @@ def validar_e_corrigir_dados(dados):
     return dados
 
 # =====================================================================
-# SIDEBAR CONFIGURAÇÕES - CORRIGIDO
+# PROCESSAMENTO GEMINI (SIMPLIFICADO)
+# =====================================================================
+def calcular_delay(tentativa, error_msg):
+    if "retry in" in error_msg.lower():
+        try:
+            return min(float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2, MAX_RETRY_DELAY)
+        except:
+            pass
+    return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
+
+def processar_pagina_gemini(prompt_instrucao, page_stream):
+    """Processa uma página PDF com Gemini com retry"""
+    for tentativa in range(MAX_RETRIES + 1):
+        try:
+            start = time.time()
+            resp = model.generate_content(
+                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
+                generation_config={"response_mime_type": "application/json"},
+                request_options={'timeout': 60}
+            )
+            tempo = round(time.time() - start, 2)
+            texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
+            try:
+                dados = json.loads(texto)
+            except Exception as e:
+                dados = {"error": f"Resposta não era JSON válido: {str(e)}", "_raw": texto[:200]}
+            return dados, True, tempo, "Gemini"
+        except ResourceExhausted as e:
+            delay = calcular_delay(tentativa, str(e))
+            st.sidebar.warning(f"⚠️ Quota excedida (tentativa {tentativa + 1}/{MAX_RETRIES}). Aguardando {delay}s...")
+            time.sleep(delay)
+        except Exception as e:
+            if tentativa < MAX_RETRIES:
+                st.sidebar.warning(f"⚠️ Erro Gemini (tentativa {tentativa + 1}/{MAX_RETRIES}): {str(e)}")
+                time.sleep(MIN_RETRY_DELAY)
+            else:
+                return {"error": str(e)}, False, 0, "Gemini"
+    return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
+
+# =====================================================================
+# SIDEBAR CONFIGURAÇÕES
 # =====================================================================
 with st.sidebar:
-    st.markdown("### 🔧 Configurações Avançadas")
-    
-    # Configuração de provedores
-    st.markdown("#### Provedores de IA")
-    
-    # Obter provedores disponíveis da configuração
-    available_providers = [p for p in multi_ai.providers_config]
-    
-    for provider_config in available_providers:
-        provider_name = provider_config['name']
-        
-        # Verificar estado atual do provedor
-        is_enabled = any(p['name'] == provider_name and p.get('enabled', True) 
-                        for p in multi_ai.get_enabled_providers())
-        
-        # Checkbox para habilitar/desabilitar
-        new_status = st.checkbox(
-            f"{provider_name}", 
-            value=is_enabled,
-            key=f"provider_{provider_name}"
-        )
-        
-        # Atualizar status se mudou
-        if new_status != is_enabled:
-            multi_ai.update_provider_status(provider_name, new_status)
-            st.rerun()
+    st.markdown("### 🔧 Configurações")
     
     # Configuração de cache
     st.markdown("#### Otimizações")
@@ -631,21 +300,7 @@ with st.sidebar:
     if st.button("🔄 Limpar Cache"):
         document_cache.clear()
         st.success("Cache limpo!")
-    
-    # Estatísticas dos provedores
-    st.markdown("#### 📊 Estatísticas dos Provedores")
-    stats = multi_ai.get_stats()
-    for provider_name in [p['name'] for p in available_providers]:
-        if provider_name in stats:
-            stat = stats[provider_name]
-            total = stat['success'] + stat['errors']
-            if total > 0:
-                success_rate = (stat['success'] / total) * 100
-                avg_time = stat['total_time'] / stat['success'] if stat['success'] > 0 else 0
-                st.write(f"**{provider_name}**:")
-                st.write(f"✅ {stat['success']} | ❌ {stat['errors']}")
-                st.write(f"📊 {success_rate:.1f}% | ⏱️ {avg_time:.1f}s")
-                st.write("---")
+        st.rerun()
 
 # =====================================================================
 # DASHBOARD ANALÍTICO
@@ -680,19 +335,6 @@ def criar_dashboard_analitico():
         erros = len([log for log in logs if log[2] != "OK"])
         st.metric("❌ Erros", erros)
     
-    # Estatísticas por provedor
-    if logs:
-        st.markdown("#### 🔄 Uso dos Provedores")
-        provider_stats = {}
-        for log in logs:
-            if len(log) > 4 and log[4]:  # provider info
-                provider = log[4]
-                provider_stats[provider] = provider_stats.get(provider, 0) + 1
-        
-        for provider, count in provider_stats.items():
-            provider_class = f"provider-{provider.lower()}"
-            st.markdown(f"<span class='{provider_class}'>**{provider}**: {count} páginas</span>", unsafe_allow_html=True)
-    
     # Estatísticas por emitente
     if resultados:
         st.markdown("#### 📈 Emitentes Mais Frequentes")
@@ -714,7 +356,7 @@ col_up_a, col_up_b = st.columns([1,1])
 with col_up_a:
     process_btn = st.button("🚀 Processar PDFs")
 with col_up_b:
-    clear_session = st.button("♻️ Limpar sessão (apagar temporários)")
+    clear_session = st.button("♻️ Limpar sessão")
 
 st.markdown("</div>", unsafe_allow_html=True)
 
@@ -731,12 +373,6 @@ if clear_session:
     st.rerun()
 
 if uploaded_files and process_btn:
-    # Verificar se há provedores habilitados
-    enabled_providers = multi_ai.get_enabled_providers()
-    if not enabled_providers:
-        st.error("❌ Nenhum provedor de IA habilitado. Habilite pelo menos um provedor na sidebar.")
-        st.stop()
-    
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
@@ -758,7 +394,6 @@ if uploaded_files and process_btn:
             st.warning(f"Arquivo inválido: {a['name']}")
 
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
-    st.info(f"🔧 Provedores ativos: {[p['name'] for p in enabled_providers]}")
 
     agrupados_bytes = {}
     resultados_meta = []
@@ -778,25 +413,42 @@ if uploaded_files and process_btn:
         try:
             reader = PdfReader(io.BytesIO(a["bytes"]))
         except Exception:
-            processed_logs.append((name, 0, "ERRO_LEITURA", "", "Nenhum"))
+            processed_logs.append((name, 0, "ERRO_LEITURA", "", "Gemini"))
             continue
 
         for idx, page in enumerate(reader.pages):
+            # Verificar cache primeiro
             b = io.BytesIO()
             w = PdfWriter()
             w.add_page(page)
             w.write(b)
             b.seek(0)
-
-            # CHAMADA MULTI-IA COM FALLBACK
-            dados, ok, tempo, provider = multi_ai.process_pdf_page(prompt, b)
+            
+            cache_key = document_cache.get_cache_key(b.getvalue(), prompt)
+            cached_result = document_cache.get(cache_key)
+            
+            if cached_result and st.session_state.get("use_cache", True):
+                dados, tempo, provider = cached_result['dados'], cached_result['tempo'], cached_result['provider']
+                ok = True
+                st.sidebar.info("💾 Usando cache")
+            else:
+                # Processar com Gemini
+                dados, ok, tempo, provider = processar_pagina_gemini(prompt, b)
+                
+                # Salvar no cache se bem-sucedido
+                if ok and "error" not in dados:
+                    document_cache.set(cache_key, {
+                        'dados': dados,
+                        'tempo': tempo,
+                        'provider': provider
+                    })
             
             page_label = f"{name} (pág {idx+1})"
             if not ok or "error" in dados:
                 processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados)), provider))
                 progresso += 1
                 progress_bar.progress(min(progresso/total_paginas, 1.0))
-                progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA [{provider}]</span>", unsafe_allow_html=True)
+                progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA</span>", unsafe_allow_html=True)
                 resultados_meta.append({
                     "arquivo_origem": name,
                     "pagina": idx+1,
@@ -821,7 +473,6 @@ if uploaded_files and process_btn:
             key = (numero, emitente)
             agrupados_bytes.setdefault(key, []).append(b.getvalue())
 
-            provider_class = f"provider-{provider.lower()}" if provider else ""
             processed_logs.append((page_label, tempo, "OK", f"{numero} / {emitente}", provider))
             resultados_meta.append({
                 "arquivo_origem": name,
@@ -835,7 +486,7 @@ if uploaded_files and process_btn:
 
             progresso += 1
             progress_bar.progress(min(progresso/total_paginas, 1.0))
-            progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — OK ({tempo:.2f}s) <span class='{provider_class}'>[{provider}]</span></span>", unsafe_allow_html=True)
+            progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — OK ({tempo:.2f}s)</span>", unsafe_allow_html=True)
 
     resultados = []
     files_meta = {}
@@ -1008,11 +659,10 @@ if "resultados" in st.session_state:
         st.markdown("### 📝 Logs de processamento (últimas páginas)")
         for entry in st.session_state["processed_logs"][-200:]:
             label, t, status, info, provider = (entry + ("", "", ""))[:5]
-            provider_class = f"provider-{provider.lower()}" if provider else ""
             if status == "OK":
-                st.markdown(f"<div class='success-log'>✅ {label} — {info} — {t:.2f}s <span class='{provider_class}'>[{provider}]</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='success-log'>✅ {label} — {info} — {t:.2f}s</div>", unsafe_allow_html=True)
             else:
-                st.markdown(f"<div class='warning-log'>⚠️ {label} — {info} <span class='{provider_class}'>[{provider}]</span></div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='warning-log'>⚠️ {label} — {info}</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.session_state["novos_nomes"] = novos_nomes
