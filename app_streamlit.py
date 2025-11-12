@@ -215,29 +215,41 @@ class MultiAIProvider:
         error_count = 0
 
         for provider in self.providers:
-            if not provider.get('enabled', True):
-                continue
+    if not provider.get('enabled', True):
+        continue
 
-            st.sidebar.info(f"🔄 Tentando {provider['name']}...")
+    inicio = time.time()
+    st.sidebar.info(f"🔄 Tentando {provider['name']}...")
 
-            try:
-                if provider['type'] == 'gemini':
-                    dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
-                elif provider['type'] == 'openai':
-                    dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
-                elif provider['type'] == 'deepseek':
-                    dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
-                elif provider['type'] == 'claude':
-                    dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
+    try:
+        if provider['type'] == 'gemini':
+            dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
+        elif provider['type'] == 'openai':
+            dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
+        elif provider['type'] == 'deepseek':
+            dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
+        elif provider['type'] == 'claude':
+            dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
+        else:
+            continue  # ignora provider inválido
 
-                self.stats[provider['name']]['success'] += 1
-                self.stats[provider['name']]['total_time'] += tempo
-                self.active_provider = provider['name']
+        self.stats[provider['name']]['success'] += 1
+        self.stats[provider['name']]['total_time'] += tempo
+        self.active_provider = provider['name']
 
-                document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider['name']})
-                return dados, True, tempo, provider['name']
+        document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider['name']})
+        return dados, True, tempo, provider['name']
 
-            except ResourceExhausted as e:
+    except Exception as e:
+        tempo_falha = round(time.time() - inicio, 2)
+        self.stats[provider['name']]['errors'] += 1
+        last_error = f"{provider['name']} falhou em {tempo_falha:.2f}s: {e}"
+        st.sidebar.warning(f"⚠️ {provider['name']} falhou ({tempo_falha:.2f}s). Tentando próximo...")
+        continue  # ← fallback rápido e automático (sem travar nem reprocessar)
+
+# Se nenhum provedor funcionou:
+return {"error": f"Todos os provedores falharam. Último erro: {last_error}"}, False, 0, "Nenhum"
+
                 error_count += 1
                 last_error = f"{provider['name']} quota error: {str(e)}"
                 self.stats[provider['name']]['errors'] += 1
