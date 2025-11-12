@@ -138,7 +138,7 @@ class DocumentCache:
 document_cache = DocumentCache()
 
 # =====================================================================
-# SISTEMA MULTI-IA COM FALLBACK
+# MULTI-IA COM FALLBACK (REFATORADO)
 # =====================================================================
 class MultiAIProvider:
     def __init__(self):
@@ -146,9 +146,11 @@ class MultiAIProvider:
         self.active_provider = None
         self.stats = {p['name']: {'success': 0, 'errors': 0, 'total_time': 0} for p in self.providers}
 
+    # --------------------------
+    # Configuração dos provedores
+    # --------------------------
     def _setup_providers(self):
         providers = []
-        # Configuração semelhante à sua versão atual
         if os.getenv("GOOGLE_API_KEY"):
             try:
                 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -157,6 +159,7 @@ class MultiAIProvider:
                 st.sidebar.success("✅ Gemini configurado")
             except Exception:
                 st.sidebar.warning("⚠️ Gemini não configurado")
+
         if os.getenv("OPENAI_API_KEY"):
             try:
                 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -164,12 +167,14 @@ class MultiAIProvider:
                 st.sidebar.success("✅ OpenAI configurado")
             except Exception:
                 st.sidebar.warning("⚠️ OpenAI não configurado")
+
         if os.getenv("DEEPSEEK_API_KEY"):
             try:
                 providers.append({'name': 'DeepSeek', 'api_key': os.getenv("DEEPSEEK_API_KEY"), 'type': 'deepseek', 'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"), 'priority': 3, 'enabled': True})
                 st.sidebar.success("✅ DeepSeek configurado")
             except Exception:
                 st.sidebar.warning("⚠️ DeepSeek não configurado")
+
         if os.getenv("ANTHROPIC_API_KEY"):
             try:
                 providers.append({'name': 'Claude', 'api_key': os.getenv("ANTHROPIC_API_KEY"), 'type': 'claude', 'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"), 'priority': 4, 'enabled': True})
@@ -183,6 +188,22 @@ class MultiAIProvider:
 
         return sorted(providers, key=lambda x: x['priority'])
 
+    # --------------------------
+    # Função auxiliar: extrair texto de PDF
+    # --------------------------
+    def pdf_para_texto(self, page_stream):
+        """Extrai texto de um PDF (uma página) usando PyPDF2"""
+        reader = PdfReader(io.BytesIO(page_stream.getvalue()))
+        texto = ""
+        for p in reader.pages:
+            t = p.extract_text()
+            if t:
+                texto += t + "\n"
+        return texto.strip()
+
+    # --------------------------
+    # Processamento com fallback
+    # --------------------------
     def process_pdf_page(self, prompt_instrucao, page_stream, max_retries=2):
         cache_key = document_cache.get_cache_key(page_stream.getvalue(), prompt_instrucao)
         cached_result = document_cache.get(cache_key)
@@ -220,14 +241,12 @@ class MultiAIProvider:
                 error_count += 1
                 last_error = f"{provider['name']} quota error: {str(e)}"
                 self.stats[provider['name']]['errors'] += 1
-                # Silencioso no UI, não mostra alerta assustador
                 time.sleep(1)
                 continue
             except Exception as e:
                 error_count += 1
                 last_error = f"{provider['name']} error: {str(e)}"
                 self.stats[provider['name']]['errors'] += 1
-                # Se for a primeira falha, não trocar de provedor
                 if error_count < 2:
                     st.sidebar.warning(f"⚠️ {provider['name']} falhou, tentativa 1, reprocessando...")
                     time.sleep(2)
@@ -238,7 +257,9 @@ class MultiAIProvider:
 
         return {"error": f"Todos os provedores falharam. Último erro: {last_error}"}, False, 0, "Nenhum"
 
-    
+    # --------------------------
+    # Chamadas individuais
+    # --------------------------
     def _call_gemini(self, provider, prompt, page_stream):
         start = time.time()
         resp = provider['model'].generate_content(
@@ -250,30 +271,15 @@ class MultiAIProvider:
         texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
         dados = json.loads(texto)
         return dados, tempo
-    
+
     def _call_openai(self, provider, prompt, page_stream):
         start = time.time()
-        
-        # Codificar PDF em base64 para OpenAI
-        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
-        
+        texto_pdf = self.pdf_para_texto(page_stream)
+        content = f"{prompt}\n\n{texto_pdf}"
+
         response = provider['client'].chat.completions.create(
             model=provider['model'],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:application/pdf;base64,{pdf_base64}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": content}],
             timeout=60
         )
         
@@ -281,49 +287,33 @@ class MultiAIProvider:
         texto = response.choices[0].message.content
         dados = json.loads(texto)
         return dados, tempo
-    
+
     def _call_deepseek(self, provider, prompt, page_stream):
         start = time.time()
-        
-        # Deepseek API (similar à OpenAI)
+        texto_pdf = self.pdf_para_texto(page_stream)
+        content = f"{prompt}\n\n{texto_pdf}"
+
         client = OpenAI(
             api_key=provider['api_key'],
             base_url="https://api.deepseek.com/v1"
         )
-        
-        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
-        
+
         response = client.chat.completions.create(
             model=provider['model'],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:application/pdf;base64,{pdf_base64}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": content}],
             timeout=60
         )
-        
+
         tempo = round(time.time() - start, 2)
         texto = response.choices[0].message.content
         dados = json.loads(texto)
         return dados, tempo
-    
+
     def _call_claude(self, provider, prompt, page_stream):
         start = time.time()
-        
-        # Anthropic Claude API
-        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
-        
+        texto_pdf = self.pdf_para_texto(page_stream)
+        content = f"{prompt}\n\n{texto_pdf}"
+
         headers = {
             "x-api-key": provider['api_key'],
             "anthropic-version": "2023-06-01",
@@ -333,45 +323,31 @@ class MultiAIProvider:
         data = {
             "model": provider['model'],
             "max_tokens": 1000,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "application/pdf",
-                                "data": pdf_base64
-                            }
-                        }
-                    ]
-                }
-            ]
+            "messages": [{"role": "user", "content": content}]
         }
-        
+
         response = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers=headers,
             json=data,
             timeout=60
         )
-        
+
         if response.status_code != 200:
             raise Exception(f"Claude API error: {response.text}")
-        
+
         tempo = round(time.time() - start, 2)
         result = response.json()
         texto = result['content'][0]['text']
         dados = json.loads(texto)
         return dados, tempo
-    
+
+    # --------------------------
+    # Estatísticas
+    # --------------------------
     def get_stats(self):
         return self.stats
+
 
 # Inicializar o multi-IA
 multi_ai = MultiAIProvider()
