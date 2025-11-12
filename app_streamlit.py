@@ -93,10 +93,10 @@ os.makedirs(TEMP_FOLDER, exist_ok=True)
 # Configurações de Limites
 MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "30")) # Reduzido para evitar quota
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
-MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "10")) # Aumentado
-MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "60")) # Aumentado
-REQUEST_DELAY = int(os.getenv("REQUEST_DELAY", "2"))  # Delay entre requisições
-MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-1.5-flash") # Modelo mais leve
+MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "10")) # Aumentado
+MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "60")) # Aumentado
+REQUEST_DELAY = int(os.getenv("REQUEST_DELAY", "2")) # Delay entre requisições
+MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-1.5-flash") # Modelo mais leve
 
 # Constante do Prompt de Instrução (Para melhor organização)
 PROMPT_INSTRUCAO_GEMINI = (
