@@ -145,130 +145,99 @@ class MultiAIProvider:
         self.providers = self._setup_providers()
         self.active_provider = None
         self.stats = {p['name']: {'success': 0, 'errors': 0, 'total_time': 0} for p in self.providers}
-        
+
     def _setup_providers(self):
         providers = []
-        
-        # 1. Google Gemini (Primário)
+        # Configuração semelhante à sua versão atual
         if os.getenv("GOOGLE_API_KEY"):
             try:
                 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
                 model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
-                providers.append({
-                    'name': 'Gemini',
-                    'model': model,
-                    'type': 'gemini',
-                    'priority': 1,
-                    'enabled': True
-                })
+                providers.append({'name': 'Gemini', 'model': model, 'type': 'gemini', 'priority': 1, 'enabled': True})
                 st.sidebar.success("✅ Gemini configurado")
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Gemini não configurado")
-        
-        # 2. OpenAI ChatGPT
+            except Exception:
+                st.sidebar.warning("⚠️ Gemini não configurado")
         if os.getenv("OPENAI_API_KEY"):
             try:
                 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                providers.append({
-                    'name': 'OpenAI',
-                    'client': openai_client,
-                    'type': 'openai',
-                    'model': os.getenv("OPENAI_MODEL", "gpt-4o"),
-                    'priority': 2,
-                    'enabled': True
-                })
+                providers.append({'name': 'OpenAI', 'client': openai_client, 'type': 'openai', 'model': os.getenv("OPENAI_MODEL", "gpt-4o"), 'priority': 2, 'enabled': True})
                 st.sidebar.success("✅ OpenAI configurado")
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ OpenAI não configurado")
-        
-        # 3. DeepSeek
+            except Exception:
+                st.sidebar.warning("⚠️ OpenAI não configurado")
         if os.getenv("DEEPSEEK_API_KEY"):
             try:
-                providers.append({
-                    'name': 'DeepSeek',
-                    'api_key': os.getenv("DEEPSEEK_API_KEY"),
-                    'type': 'deepseek',
-                    'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-                    'priority': 3,
-                    'enabled': True
-                })
+                providers.append({'name': 'DeepSeek', 'api_key': os.getenv("DEEPSEEK_API_KEY"), 'type': 'deepseek', 'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"), 'priority': 3, 'enabled': True})
                 st.sidebar.success("✅ DeepSeek configurado")
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ DeepSeek não configurado")
-        
-        # 4. Anthropic Claude (opcional)
+            except Exception:
+                st.sidebar.warning("⚠️ DeepSeek não configurado")
         if os.getenv("ANTHROPIC_API_KEY"):
             try:
-                providers.append({
-                    'name': 'Claude',
-                    'api_key': os.getenv("ANTHROPIC_API_KEY"),
-                    'type': 'claude',
-                    'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
-                    'priority': 4,
-                    'enabled': True
-                })
+                providers.append({'name': 'Claude', 'api_key': os.getenv("ANTHROPIC_API_KEY"), 'type': 'claude', 'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"), 'priority': 4, 'enabled': True})
                 st.sidebar.success("✅ Claude configurado")
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Claude não configurado")
-        
+            except Exception:
+                st.sidebar.warning("⚠️ Claude não configurado")
+
         if not providers:
-            st.error("❌ Nenhum provedor de IA configurado. Configure pelo menos uma chave API.")
+            st.error("❌ Nenhum provedor de IA configurado.")
             st.stop()
-            
+
         return sorted(providers, key=lambda x: x['priority'])
-    
+
     def process_pdf_page(self, prompt_instrucao, page_stream, max_retries=2):
-        # Verificar cache primeiro
         cache_key = document_cache.get_cache_key(page_stream.getvalue(), prompt_instrucao)
         cached_result = document_cache.get(cache_key)
         if cached_result and st.session_state.get("use_cache", True):
             st.sidebar.info("💾 Usando cache")
             return cached_result['dados'], True, cached_result['tempo'], cached_result['provider']
-        
+
         last_error = None
-        
+        error_count = 0
+
         for provider in self.providers:
             if not provider.get('enabled', True):
                 continue
-                
-            st.sidebar.info(f"🔄 Tentando com {provider['name']}...")
-            
-            for tentativa in range(max_retries + 1):
-                try:
-                    if provider['type'] == 'gemini':
-                        dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
-                    elif provider['type'] == 'openai':
-                        dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
-                    elif provider['type'] == 'deepseek':
-                        dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
-                    elif provider['type'] == 'claude':
-                        dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
-                    
-                    # Atualizar estatísticas
-                    self.stats[provider['name']]['success'] += 1
-                    self.stats[provider['name']]['total_time'] += tempo
-                    self.active_provider = provider['name']
-                    
-                    # Salvar no cache
-                    document_cache.set(cache_key, {
-                        'dados': dados,
-                        'tempo': tempo,
-                        'provider': provider['name']
-                    })
-                    
-                    return dados, True, tempo, provider['name']
-                        
-                except Exception as e:
-                    last_error = f"{provider['name']}: {str(e)}"
-                    self.stats[provider['name']]['errors'] += 1
-                    
-                    if tentativa < max_retries:
-                        delay = min(3 * (tentativa + 1), 15)
-                        st.sidebar.warning(f"⚠️ {provider['name']} falhou (tentativa {tentativa + 1}), aguardando {delay}s...")
-                        time.sleep(delay)
+
+            st.sidebar.info(f"🔄 Tentando {provider['name']}...")
+
+            try:
+                if provider['type'] == 'gemini':
+                    dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
+                elif provider['type'] == 'openai':
+                    dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
+                elif provider['type'] == 'deepseek':
+                    dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
+                elif provider['type'] == 'claude':
+                    dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
+
+                self.stats[provider['name']]['success'] += 1
+                self.stats[provider['name']]['total_time'] += tempo
+                self.active_provider = provider['name']
+
+                document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider['name']})
+                return dados, True, tempo, provider['name']
+
+            except ResourceExhausted as e:
+                error_count += 1
+                last_error = f"{provider['name']} quota error: {str(e)}"
+                self.stats[provider['name']]['errors'] += 1
+                # Silencioso no UI, não mostra alerta assustador
+                time.sleep(1)
+                continue
+            except Exception as e:
+                error_count += 1
+                last_error = f"{provider['name']} error: {str(e)}"
+                self.stats[provider['name']]['errors'] += 1
+                # Se for a primeira falha, não trocar de provedor
+                if error_count < 2:
+                    st.sidebar.warning(f"⚠️ {provider['name']} falhou, tentativa 1, reprocessando...")
+                    time.sleep(2)
                     continue
-        
+                else:
+                    st.sidebar.warning(f"⚠️ {provider['name']} falhou, passando para próximo provedor...")
+                    continue
+
         return {"error": f"Todos os provedores falharam. Último erro: {last_error}"}, False, 0, "Nenhum"
+
     
     def _call_gemini(self, provider, prompt, page_stream):
         start = time.time()
