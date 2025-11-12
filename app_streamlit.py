@@ -138,84 +138,112 @@ class DocumentCache:
 document_cache = DocumentCache()
 
 # =====================================================================
-# SISTEMA MULTI-IA COM FALLBACK
+# SISTEMA MULTI-IA COM FALLBACK - CORRIGIDO
 # =====================================================================
 class MultiAIProvider:
     def __init__(self):
-        self.providers = self._setup_providers()
+        self.providers_config = self._setup_providers_config()
+        self.providers = []
         self.active_provider = None
-        self.stats = {p['name']: {'success': 0, 'errors': 0, 'total_time': 0} for p in self.providers}
+        self.stats = {}
+        self._initialize_providers()
         
-    def _setup_providers(self):
-        providers = []
+    def _setup_providers_config(self):
+        """Configuração base dos provedores - sem inicialização"""
+        providers_config = []
         
-        # 1. Google Gemini (Primário)
+        # 1. Google Gemini
         if os.getenv("GOOGLE_API_KEY"):
-            try:
-                genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-                model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
-                providers.append({
-                    'name': 'Gemini',
-                    'model': model,
-                    'type': 'gemini',
-                    'priority': 1,
-                    'enabled': True
-                })
-                st.sidebar.success("✅ Gemini configurado")
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Gemini não configurado")
+            providers_config.append({
+                'name': 'Gemini',
+                'type': 'gemini',
+                'priority': 1,
+                'enabled': True,
+                'api_key': os.getenv("GOOGLE_API_KEY"),
+                'model_name': os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
+            })
         
         # 2. OpenAI ChatGPT
         if os.getenv("OPENAI_API_KEY"):
-            try:
-                openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                providers.append({
-                    'name': 'OpenAI',
-                    'client': openai_client,
-                    'type': 'openai',
-                    'model': os.getenv("OPENAI_MODEL", "gpt-4o"),
-                    'priority': 2,
-                    'enabled': True
-                })
-                st.sidebar.success("✅ OpenAI configurado")
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ OpenAI não configurado")
+            providers_config.append({
+                'name': 'OpenAI',
+                'type': 'openai',
+                'model': os.getenv("OPENAI_MODEL", "gpt-4o"),
+                'priority': 2,
+                'enabled': True,
+                'api_key': os.getenv("OPENAI_API_KEY")
+            })
         
         # 3. DeepSeek
         if os.getenv("DEEPSEEK_API_KEY"):
-            try:
-                providers.append({
-                    'name': 'DeepSeek',
-                    'api_key': os.getenv("DEEPSEEK_API_KEY"),
-                    'type': 'deepseek',
-                    'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-                    'priority': 3,
-                    'enabled': True
-                })
-                st.sidebar.success("✅ DeepSeek configurado")
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ DeepSeek não configurado")
+            providers_config.append({
+                'name': 'DeepSeek',
+                'type': 'deepseek',
+                'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+                'priority': 3,
+                'enabled': True,
+                'api_key': os.getenv("DEEPSEEK_API_KEY")
+            })
         
-        # 4. Anthropic Claude (opcional)
+        # 4. Anthropic Claude
         if os.getenv("ANTHROPIC_API_KEY"):
-            try:
-                providers.append({
-                    'name': 'Claude',
-                    'api_key': os.getenv("ANTHROPIC_API_KEY"),
-                    'type': 'claude',
-                    'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
-                    'priority': 4,
-                    'enabled': True
-                })
-                st.sidebar.success("✅ Claude configurado")
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Claude não configurado")
+            providers_config.append({
+                'name': 'Claude',
+                'type': 'claude',
+                'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
+                'priority': 4,
+                'enabled': True,
+                'api_key': os.getenv("ANTHROPIC_API_KEY")
+            })
         
-        if not providers:
-            st.error("❌ Nenhum provedor de IA configurado. Configure pelo menos uma chave API.")
-            st.stop()
-            
-        return sorted(providers, key=lambda x: x['priority'])
+        return sorted(providers_config, key=lambda x: x['priority'])
+    
+    def _initialize_providers(self):
+        """Inicializa os provedores baseado na configuração"""
+        self.providers = []
+        
+        for config in self.providers_config:
+            try:
+                provider = config.copy()
+                
+                if config['type'] == 'gemini' and config.get('enabled', True):
+                    genai.configure(api_key=config['api_key'])
+                    provider['model'] = genai.GenerativeModel(config['model_name'])
+                    self.providers.append(provider)
+                    
+                elif config['type'] == 'openai' and config.get('enabled', True):
+                    provider['client'] = OpenAI(api_key=config['api_key'])
+                    self.providers.append(provider)
+                    
+                elif config['type'] == 'deepseek' and config.get('enabled', True):
+                    # Deepseek será inicializado na chamada
+                    self.providers.append(provider)
+                    
+                elif config['type'] == 'claude' and config.get('enabled', True):
+                    # Claude usa requests diretamente
+                    self.providers.append(provider)
+                    
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ {config['name']} falhou na inicialização: {str(e)}")
+        
+        # Inicializar estatísticas
+        for provider in self.providers:
+            self.stats[provider['name']] = {'success': 0, 'errors': 0, 'total_time': 0}
+        
+        if not self.providers:
+            st.error("❌ Nenhum provedor de IA configurado ou habilitado.")
+    
+    def update_provider_status(self, provider_name, enabled):
+        """Atualiza status do provedor e reinicializa"""
+        for config in self.providers_config:
+            if config['name'] == provider_name:
+                config['enabled'] = enabled
+                break
+        self._initialize_providers()
+    
+    def get_enabled_providers(self):
+        """Retorna lista de provedores habilitados"""
+        return [p for p in self.providers if p.get('enabled', True)]
     
     def process_pdf_page(self, prompt_instrucao, page_stream, max_retries=2):
         # Verificar cache primeiro
@@ -226,11 +254,12 @@ class MultiAIProvider:
             return cached_result['dados'], True, cached_result['tempo'], cached_result['provider']
         
         last_error = None
+        enabled_providers = self.get_enabled_providers()
         
-        for provider in self.providers:
-            if not provider.get('enabled', True):
-                continue
-                
+        if not enabled_providers:
+            return {"error": "Nenhum provedor habilitado"}, False, 0, "Nenhum"
+        
+        for provider in enabled_providers:
             st.sidebar.info(f"🔄 Tentando com {provider['name']}...")
             
             for tentativa in range(max_retries + 1):
@@ -243,6 +272,8 @@ class MultiAIProvider:
                         dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
                     elif provider['type'] == 'claude':
                         dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
+                    else:
+                        continue
                     
                     # Atualizar estatísticas
                     self.stats[provider['name']]['success'] += 1
@@ -279,7 +310,21 @@ class MultiAIProvider:
         )
         tempo = round(time.time() - start, 2)
         texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
-        dados = json.loads(texto)
+        
+        # Verificar se é JSON válido
+        if texto.startswith('{') and texto.endswith('}'):
+            dados = json.loads(texto)
+        else:
+            # Tentar extrair JSON da resposta
+            try:
+                json_match = re.search(r'\{.*\}', texto, re.DOTALL)
+                if json_match:
+                    dados = json.loads(json_match.group())
+                else:
+                    dados = {"error": "Resposta não é JSON válido", "raw_text": texto[:100]}
+            except:
+                dados = {"error": "Falha ao parsear JSON", "raw_text": texto[:100]}
+        
         return dados, tempo
     
     def _call_openai(self, provider, prompt, page_stream):
@@ -310,13 +355,26 @@ class MultiAIProvider:
         
         tempo = round(time.time() - start, 2)
         texto = response.choices[0].message.content
-        dados = json.loads(texto)
+        
+        try:
+            dados = json.loads(texto)
+        except json.JSONDecodeError:
+            # Tentar extrair JSON da resposta
+            try:
+                json_match = re.search(r'\{.*\}', texto, re.DOTALL)
+                if json_match:
+                    dados = json.loads(json_match.group())
+                else:
+                    dados = {"error": "Resposta não é JSON válido", "raw_text": texto[:100]}
+            except:
+                dados = {"error": "Falha ao parsear JSON", "raw_text": texto[:100]}
+        
         return dados, tempo
     
     def _call_deepseek(self, provider, prompt, page_stream):
         start = time.time()
         
-        # Deepseek API (similar à OpenAI)
+        # Inicializar cliente Deepseek
         client = OpenAI(
             api_key=provider['api_key'],
             base_url="https://api.deepseek.com/v1"
@@ -324,30 +382,46 @@ class MultiAIProvider:
         
         pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
         
-        response = client.chat.completions.create(
-            model=provider['model'],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:application/pdf;base64,{pdf_base64}"
+        try:
+            response = client.chat.completions.create(
+                model=provider['model'],
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:application/pdf;base64,{pdf_base64}"
+                                }
                             }
-                        }
-                    ]
-                }
-            ],
-            response_format={"type": "json_object"},
-            timeout=60
-        )
-        
-        tempo = round(time.time() - start, 2)
-        texto = response.choices[0].message.content
-        dados = json.loads(texto)
-        return dados, tempo
+                        ]
+                    }
+                ],
+                response_format={"type": "json_object"},
+                timeout=60
+            )
+            
+            tempo = round(time.time() - start, 2)
+            texto = response.choices[0].message.content
+            
+            try:
+                dados = json.loads(texto)
+            except json.JSONDecodeError:
+                try:
+                    json_match = re.search(r'\{.*\}', texto, re.DOTALL)
+                    if json_match:
+                        dados = json.loads(json_match.group())
+                    else:
+                        dados = {"error": "Resposta não é JSON válido", "raw_text": texto[:100]}
+                except:
+                    dados = {"error": "Falha ao parsear JSON", "raw_text": texto[:100]}
+            
+            return dados, tempo
+            
+        except Exception as e:
+            raise Exception(f"DeepSeek API error: {str(e)}")
     
     def _call_claude(self, provider, prompt, page_stream):
         start = time.time()
@@ -398,7 +472,19 @@ class MultiAIProvider:
         tempo = round(time.time() - start, 2)
         result = response.json()
         texto = result['content'][0]['text']
-        dados = json.loads(texto)
+        
+        try:
+            dados = json.loads(texto)
+        except json.JSONDecodeError:
+            try:
+                json_match = re.search(r'\{.*\}', texto, re.DOTALL)
+                if json_match:
+                    dados = json.loads(json_match.group())
+                else:
+                    dados = {"error": "Resposta não é JSON válido", "raw_text": texto[:100]}
+            except:
+                dados = {"error": "Falha ao parsear JSON", "raw_text": texto[:100]}
+        
         return dados, tempo
     
     def get_stats(self):
@@ -508,20 +594,35 @@ def validar_e_corrigir_dados(dados):
     return dados
 
 # =====================================================================
-# SIDEBAR CONFIGURAÇÕES
+# SIDEBAR CONFIGURAÇÕES - CORRIGIDO
 # =====================================================================
 with st.sidebar:
     st.markdown("### 🔧 Configurações Avançadas")
     
     # Configuração de provedores
     st.markdown("#### Provedores de IA")
-    for provider in multi_ai.providers:
-        enabled = st.checkbox(
-            f"{provider['name']}", 
-            value=provider.get('enabled', True),
-            key=f"provider_{provider['name']}"
+    
+    # Obter provedores disponíveis da configuração
+    available_providers = [p for p in multi_ai.providers_config]
+    
+    for provider_config in available_providers:
+        provider_name = provider_config['name']
+        
+        # Verificar estado atual do provedor
+        is_enabled = any(p['name'] == provider_name and p.get('enabled', True) 
+                        for p in multi_ai.get_enabled_providers())
+        
+        # Checkbox para habilitar/desabilitar
+        new_status = st.checkbox(
+            f"{provider_name}", 
+            value=is_enabled,
+            key=f"provider_{provider_name}"
         )
-        provider['enabled'] = enabled
+        
+        # Atualizar status se mudou
+        if new_status != is_enabled:
+            multi_ai.update_provider_status(provider_name, new_status)
+            st.rerun()
     
     # Configuração de cache
     st.markdown("#### Otimizações")
@@ -534,15 +635,17 @@ with st.sidebar:
     # Estatísticas dos provedores
     st.markdown("#### 📊 Estatísticas dos Provedores")
     stats = multi_ai.get_stats()
-    for provider_name, stat in stats.items():
-        total = stat['success'] + stat['errors']
-        if total > 0:
-            success_rate = (stat['success'] / total) * 100
-            avg_time = stat['total_time'] / stat['success'] if stat['success'] > 0 else 0
-            st.write(f"**{provider_name}**:")
-            st.write(f"✅ {stat['success']} | ❌ {stat['errors']}")
-            st.write(f"📊 {success_rate:.1f}% | ⏱️ {avg_time:.1f}s")
-            st.write("---")
+    for provider_name in [p['name'] for p in available_providers]:
+        if provider_name in stats:
+            stat = stats[provider_name]
+            total = stat['success'] + stat['errors']
+            if total > 0:
+                success_rate = (stat['success'] / total) * 100
+                avg_time = stat['total_time'] / stat['success'] if stat['success'] > 0 else 0
+                st.write(f"**{provider_name}**:")
+                st.write(f"✅ {stat['success']} | ❌ {stat['errors']}")
+                st.write(f"📊 {success_rate:.1f}% | ⏱️ {avg_time:.1f}s")
+                st.write("---")
 
 # =====================================================================
 # DASHBOARD ANALÍTICO
@@ -628,6 +731,12 @@ if clear_session:
     st.rerun()
 
 if uploaded_files and process_btn:
+    # Verificar se há provedores habilitados
+    enabled_providers = multi_ai.get_enabled_providers()
+    if not enabled_providers:
+        st.error("❌ Nenhum provedor de IA habilitado. Habilite pelo menos um provedor na sidebar.")
+        st.stop()
+    
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
@@ -649,7 +758,7 @@ if uploaded_files and process_btn:
             st.warning(f"Arquivo inválido: {a['name']}")
 
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
-    st.info(f"🔧 Provedores ativos: {[p['name'] for p in multi_ai.providers if p.get('enabled', True)]}")
+    st.info(f"🔧 Provedores ativos: {[p['name'] for p in enabled_providers]}")
 
     agrupados_bytes = {}
     resultados_meta = []
