@@ -205,51 +205,62 @@ class MultiAIProvider:
     # Processamento com fallback
     # --------------------------
     def process_pdf_page(self, prompt_instrucao, page_stream, max_retries=2):
-        cache_key = document_cache.get_cache_key(page_stream.getvalue(), prompt_instrucao)
-        cached_result = document_cache.get(cache_key)
-        if cached_result and st.session_state.get("use_cache", True):
-            st.sidebar.info("💾 Usando cache")
-            return cached_result['dados'], True, cached_result['tempo'], cached_result['provider']
+    """Processa uma página de PDF com fallback automático entre provedores"""
+    cache_key = document_cache.get_cache_key(page_stream.getvalue(), prompt_instrucao)
+    cached_result = document_cache.get(cache_key)
+    if cached_result and st.session_state.get("use_cache", True):
+        st.sidebar.info("💾 Usando cache salvo")
+        return cached_result['dados'], True, cached_result['tempo'], cached_result['provider']
 
-        last_error = None
-        error_count = 0
+    last_error = None
 
-        for provider in self.providers:
-    if not provider.get('enabled', True):
-        continue
+    for provider in self.providers:
+        if not provider.get('enabled', True):
+            continue
 
-    inicio = time.time()
-    st.sidebar.info(f"🔄 Tentando {provider['name']}...")
+        inicio = time.time()
+        st.sidebar.info(f"🔄 Tentando {provider['name']}...")
 
-    try:
-        if provider['type'] == 'gemini':
-            dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
-        elif provider['type'] == 'openai':
-            dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
-        elif provider['type'] == 'deepseek':
-            dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
-        elif provider['type'] == 'claude':
-            dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
-        else:
-            continue  # ignora provider inválido
+        try:
+            # ---- GEMINI ----
+            if provider['type'] == 'gemini':
+                dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
+            # ---- OPENAI ----
+            elif provider['type'] == 'openai':
+                dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
+            # ---- DEEPSEEK ----
+            elif provider['type'] == 'deepseek':
+                dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
+            # ---- CLAUDE ----
+            elif provider['type'] == 'claude':
+                dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
+            else:
+                continue
 
-        self.stats[provider['name']]['success'] += 1
-        self.stats[provider['name']]['total_time'] += tempo
-        self.active_provider = provider['name']
+            # Sucesso — salva no cache e retorna imediatamente
+            self.stats[provider['name']]['success'] += 1
+            self.stats[provider['name']]['total_time'] += tempo
+            self.active_provider = provider['name']
 
-        document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider['name']})
-        return dados, True, tempo, provider['name']
+            document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider['name']})
+            return dados, True, tempo, provider['name']
 
-    except Exception as e:
-        tempo_falha = round(time.time() - inicio, 2)
-        self.stats[provider['name']]['errors'] += 1
-        last_error = f"{provider['name']} falhou em {tempo_falha:.2f}s: {e}"
-        st.sidebar.warning(f"⚠️ {provider['name']} falhou ({tempo_falha:.2f}s). Tentando próximo...")
-        continue  # ← fallback rápido e automático (sem travar nem reprocessar)
+        except ResourceExhausted:
+            tempo_falha = round(time.time() - inicio, 2)
+            last_error = f"{provider['name']} — cota esgotada ({tempo_falha:.2f}s)"
+            self.stats[provider['name']]['errors'] += 1
+            st.sidebar.warning(f"⚠️ {last_error}. Indo para o próximo provedor...")
+            continue
 
-# Se nenhum provedor funcionou:
-return {"error": f"Todos os provedores falharam. Último erro: {last_error}"}, False, 0, "Nenhum"
+        except Exception as e:
+            tempo_falha = round(time.time() - inicio, 2)
+            last_error = f"{provider['name']} falhou em {tempo_falha:.2f}s — {e}"
+            self.stats[provider['name']]['errors'] += 1
+            st.sidebar.warning(f"⚠️ {last_error}. Tentando próximo provedor...")
+            continue
 
+    # Se nenhum provedor funcionou:
+    return {"error": f"Todos os provedores falharam. Último erro: {last_error}"}, False, 0, "Nenhum"
                 error_count += 1
                 last_error = f"{provider['name']} quota error: {str(e)}"
                 self.stats[provider['name']]['errors'] += 1
