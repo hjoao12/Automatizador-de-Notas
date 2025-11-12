@@ -7,12 +7,18 @@ import uuid
 import shutil
 import unicodedata
 import re
+import hashlib
+import pickle
 from pathlib import Path
 from PyPDF2 import PdfReader, PdfWriter
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
 from dotenv import load_dotenv
+import openai
+from openai import OpenAI
+import requests
+import base64
 
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
@@ -20,7 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 st.set_page_config(page_title="Automatizador de Notas Fiscais", page_icon="🧾", layout="wide")
 
-# ======= CSS Corporativo Claro (corrigido, seguro e completo) =======
+# ======= CSS Corporativo Claro =======
 st.markdown("""
 <style>
 body {
@@ -66,6 +72,10 @@ div.stButton > button:hover {
   padding: 6px 10px;
   border-radius: 6px;
 }
+.provider-gemini { color: #4285F4; }
+.provider-openai { color: #19C37D; }
+.provider-deepseek { color: #0D9276; }
+.provider-claude { color: #FF6B35; }
 .top-actions {
   display: flex;
   gap: 10px;
@@ -79,43 +89,339 @@ div.stButton > button:hover {
   color:#6b7280;
 }
 .card { background: #fff; padding: 12px; border-radius:8px; box-shadow: 0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
+.metric-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🧠 Automatizador de Notas Fiscais PDF")
 
-# pequenas variáveis de estilo (corporativo claro)
+# =====================================================================
+# SISTEMA DE CACHE INTELIGENTE
+# =====================================================================
+class DocumentCache:
+    def __init__(self, cache_dir="./cache"):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+    
+    def get_cache_key(self, pdf_bytes, prompt):
+        """Gera chave única baseada no conteúdo do PDF e prompt"""
+        content_hash = hashlib.md5(pdf_bytes).hexdigest()
+        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+        return f"{content_hash}_{prompt_hash}"
+    
+    def get(self, key):
+        cache_file = self.cache_dir / f"{key}.pkl"
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
+            except:
+                return None
+        return None
+    
+    def set(self, key, data):
+        cache_file = self.cache_dir / f"{key}.pkl"
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(data, f)
+        except:
+            pass
+    
+    def clear(self):
+        """Limpa todo o cache"""
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            try:
+                cache_file.unlink()
+            except:
+                pass
+
+document_cache = DocumentCache()
+
+# =====================================================================
+# SISTEMA MULTI-IA COM FALLBACK
+# =====================================================================
+class MultiAIProvider:
+    def __init__(self):
+        self.providers = self._setup_providers()
+        self.active_provider = None
+        self.stats = {p['name']: {'success': 0, 'errors': 0, 'total_time': 0} for p in self.providers}
+        
+    def _setup_providers(self):
+        providers = []
+        
+        # 1. Google Gemini (Primário)
+        if os.getenv("GOOGLE_API_KEY"):
+            try:
+                genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+                model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
+                providers.append({
+                    'name': 'Gemini',
+                    'model': model,
+                    'type': 'gemini',
+                    'priority': 1,
+                    'enabled': True
+                })
+                st.sidebar.success("✅ Gemini configurado")
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ Gemini não configurado")
+        
+        # 2. OpenAI ChatGPT
+        if os.getenv("OPENAI_API_KEY"):
+            try:
+                openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                providers.append({
+                    'name': 'OpenAI',
+                    'client': openai_client,
+                    'type': 'openai',
+                    'model': os.getenv("OPENAI_MODEL", "gpt-4o"),
+                    'priority': 2,
+                    'enabled': True
+                })
+                st.sidebar.success("✅ OpenAI configurado")
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ OpenAI não configurado")
+        
+        # 3. DeepSeek
+        if os.getenv("DEEPSEEK_API_KEY"):
+            try:
+                providers.append({
+                    'name': 'DeepSeek',
+                    'api_key': os.getenv("DEEPSEEK_API_KEY"),
+                    'type': 'deepseek',
+                    'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+                    'priority': 3,
+                    'enabled': True
+                })
+                st.sidebar.success("✅ DeepSeek configurado")
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ DeepSeek não configurado")
+        
+        # 4. Anthropic Claude (opcional)
+        if os.getenv("ANTHROPIC_API_KEY"):
+            try:
+                providers.append({
+                    'name': 'Claude',
+                    'api_key': os.getenv("ANTHROPIC_API_KEY"),
+                    'type': 'claude',
+                    'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
+                    'priority': 4,
+                    'enabled': True
+                })
+                st.sidebar.success("✅ Claude configurado")
+            except Exception as e:
+                st.sidebar.warning(f"⚠️ Claude não configurado")
+        
+        if not providers:
+            st.error("❌ Nenhum provedor de IA configurado. Configure pelo menos uma chave API.")
+            st.stop()
+            
+        return sorted(providers, key=lambda x: x['priority'])
+    
+    def process_pdf_page(self, prompt_instrucao, page_stream, max_retries=2):
+        # Verificar cache primeiro
+        cache_key = document_cache.get_cache_key(page_stream.getvalue(), prompt_instrucao)
+        cached_result = document_cache.get(cache_key)
+        if cached_result and st.session_state.get("use_cache", True):
+            st.sidebar.info("💾 Usando cache")
+            return cached_result['dados'], True, cached_result['tempo'], cached_result['provider']
+        
+        last_error = None
+        
+        for provider in self.providers:
+            if not provider.get('enabled', True):
+                continue
+                
+            st.sidebar.info(f"🔄 Tentando com {provider['name']}...")
+            
+            for tentativa in range(max_retries + 1):
+                try:
+                    if provider['type'] == 'gemini':
+                        dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
+                    elif provider['type'] == 'openai':
+                        dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
+                    elif provider['type'] == 'deepseek':
+                        dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
+                    elif provider['type'] == 'claude':
+                        dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
+                    
+                    # Atualizar estatísticas
+                    self.stats[provider['name']]['success'] += 1
+                    self.stats[provider['name']]['total_time'] += tempo
+                    self.active_provider = provider['name']
+                    
+                    # Salvar no cache
+                    document_cache.set(cache_key, {
+                        'dados': dados,
+                        'tempo': tempo,
+                        'provider': provider['name']
+                    })
+                    
+                    return dados, True, tempo, provider['name']
+                        
+                except Exception as e:
+                    last_error = f"{provider['name']}: {str(e)}"
+                    self.stats[provider['name']]['errors'] += 1
+                    
+                    if tentativa < max_retries:
+                        delay = min(3 * (tentativa + 1), 15)
+                        st.sidebar.warning(f"⚠️ {provider['name']} falhou (tentativa {tentativa + 1}), aguardando {delay}s...")
+                        time.sleep(delay)
+                    continue
+        
+        return {"error": f"Todos os provedores falharam. Último erro: {last_error}"}, False, 0, "Nenhum"
+    
+    def _call_gemini(self, provider, prompt, page_stream):
+        start = time.time()
+        resp = provider['model'].generate_content(
+            [prompt, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
+            generation_config={"response_mime_type": "application/json"},
+            request_options={'timeout': 60}
+        )
+        tempo = round(time.time() - start, 2)
+        texto = resp.text.strip().lstrip("json").rstrip("
+").strip()
+        dados = json.loads(texto)
+        return dados, tempo
+    
+    def _call_openai(self, provider, prompt, page_stream):
+        start = time.time()
+        
+        # Codificar PDF em base64 para OpenAI
+        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
+        
+        response = provider['client'].chat.completions.create(
+            model=provider['model'],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:application/pdf;base64,{pdf_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            response_format={"type": "json_object"},
+            timeout=60
+        )
+        
+        tempo = round(time.time() - start, 2)
+        texto = response.choices[0].message.content
+        dados = json.loads(texto)
+        return dados, tempo
+    
+    def _call_deepseek(self, provider, prompt, page_stream):
+        start = time.time()
+        
+        # Deepseek API (similar à OpenAI)
+        client = OpenAI(
+            api_key=provider['api_key'],
+            base_url="https://api.deepseek.com/v1"
+        )
+        
+        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
+        
+        response = client.chat.completions.create(
+            model=provider['model'],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:application/pdf;base64,{pdf_base64}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            response_format={"type": "json_object"},
+            timeout=60
+        )
+        
+        tempo = round(time.time() - start, 2)
+        texto = response.choices[0].message.content
+        dados = json.loads(texto)
+        return dados, tempo
+    
+    def _call_claude(self, provider, prompt, page_stream):
+        start = time.time()
+        
+        # Anthropic Claude API
+        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
+        
+        headers = {
+            "x-api-key": provider['api_key'],
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json"
+        }
+        
+        data = {
+            "model": provider['model'],
+            "max_tokens": 1000,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_base64
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=data,
+            timeout=60
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Claude API error: {response.text}")
+        
+        tempo = round(time.time() - start, 2)
+        result = response.json()
+        texto = result['content'][0]['text']
+        dados = json.loads(texto)
+        return dados, tempo
+    
+    def get_stats(self):
+        return self.stats
+
+# Inicializar o multi-IA
+multi_ai = MultiAIProvider()
+
+# =====================================================================
+# CONFIGURAÇÕES GERAIS
+# =====================================================================
 PRIMARY = "#0f4c81"
 ACCENT = "#6fb3b8"
 BG = "#F7FAFC"
 CARD_BG = "#FFFFFF"
 TEXT_MUTED = "#6b7280"
-WARN = "#f6c85f"
-ERROR = "#e76f51"
 
 TEMP_FOLDER = Path("./temp")
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
 MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
-MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
-MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
-MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
-
-GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GEMINI_API_KEY:
-    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
-    st.stop()
-
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel(MODEL_NAME)
-
-st.markdown("<div class='muted'>Conectando ao modelo...</div>", unsafe_allow_html=True)
-try:
-    _ = model.name
-    st.success("✅ Google Gemini configurado.")
-except Exception:
-    st.warning("⚠️ Problema ao conectar com Gemini — verifique a variável de ambiente GOOGLE_API_KEY.")
 
 # =====================================================================
 # NORMALIZAÇÃO E SUBSTITUIÇÕES
@@ -167,46 +473,137 @@ def limpar_numero(numero: str) -> str:
     numero = re.sub(r"[^\d]", "", str(numero))
     return numero.lstrip("0") or "0"
 
-# =====================================================================
-# RETRY GEMINI
-# =====================================================================
-def calcular_delay(tentativa, error_msg):
-    if "retry in" in error_msg.lower():
-        try:
-            return min(float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2, MAX_RETRY_DELAY)
-        except:
-            pass
-    return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
-
-def chamar_gemini_retry(model, prompt_instrucao, page_stream):
-    for tentativa in range(MAX_RETRIES + 1):
-        try:
-            start = time.time()
-            resp = model.generate_content(
-                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
-                generation_config={"response_mime_type": "application/json"},
-                request_options={'timeout': 60}
-            )
-            tempo = round(time.time() - start, 2)
-            texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
-            try:
-                dados = json.loads(texto)
-            except Exception:
-                dados = {"error": "Resposta da IA não era JSON", "_raw": texto}
-            return dados, True, tempo
-        except ResourceExhausted as e:
-            delay = calcular_delay(tentativa, str(e))
-            st.warning(f"⚠️ Quota excedida (tentativa {tentativa + 1}/{MAX_RETRIES}). Aguardando {delay}s...")
-            time.sleep(delay)
-        except Exception as e:
-            if tentativa < MAX_RETRIES:
-                time.sleep(MIN_RETRY_DELAY)
-            else:
-                return {"error": str(e)}, False, 0
-    return {"error": "Falha máxima de tentativas"}, False, 0
+def validar_e_corrigir_dados(dados):
+    """Valida e corrige dados extraídos da IA"""
+    if not isinstance(dados, dict):
+        dados = {}
+    
+    required_fields = ['emitente', 'numero_nota', 'cidade']
+    
+    # Verifica campos obrigatórios
+    for field in required_fields:
+        if field not in dados or not dados[field]:
+            dados[field] = "NÃO_IDENTIFICADO"
+    
+    # Correções comuns
+    correcoes = {
+        'emitente': {
+            'CPFL ENERGIA': 'CPFL',
+            'COMPANHIA PAULISTA DE FORCA E LUZ': 'CPFL',
+            'SABARA': 'SABARA'
+        }
+    }
+    
+    for field, correcoes_field in correcoes.items():
+        if field in dados:
+            for incorreto, correto in correcoes_field.items():
+                if incorreto in dados[field].upper():
+                    dados[field] = correto
+                    break
+    
+    # Validação de número da nota
+    if 'numero_nota' in dados:
+        numero_limpo = re.sub(r'[^\d]', '', str(dados['numero_nota']))
+        dados['numero_nota'] = numero_limpo if numero_limpo else "000000"
+    
+    return dados
 
 # =====================================================================
-# Upload e Processamento
+# SIDEBAR CONFIGURAÇÕES
+# =====================================================================
+with st.sidebar:
+    st.markdown("### 🔧 Configurações Avançadas")
+    
+    # Configuração de provedores
+    st.markdown("#### Provedores de IA")
+    for provider in multi_ai.providers:
+        enabled = st.checkbox(
+            f"{provider['name']}", 
+            value=provider.get('enabled', True),
+            key=f"provider_{provider['name']}"
+        )
+        provider['enabled'] = enabled
+    
+    # Configuração de cache
+    st.markdown("#### Otimizações")
+    use_cache = st.checkbox("Usar Cache", value=True, key="use_cache")
+    
+    if st.button("🔄 Limpar Cache"):
+        document_cache.clear()
+        st.success("Cache limpo!")
+    
+    # Estatísticas dos provedores
+    st.markdown("#### 📊 Estatísticas dos Provedores")
+    stats = multi_ai.get_stats()
+    for provider_name, stat in stats.items():
+        total = stat['success'] + stat['errors']
+        if total > 0:
+            success_rate = (stat['success'] / total) * 100
+            avg_time = stat['total_time'] / stat['success'] if stat['success'] > 0 else 0
+            st.write(f"**{provider_name}**:")
+            st.write(f"✅ {stat['success']} | ❌ {stat['errors']}")
+            st.write(f"📊 {success_rate:.1f}% | ⏱️ {avg_time:.1f}s")
+            st.write("---")
+
+# =====================================================================
+# DASHBOARD ANALÍTICO
+# =====================================================================
+def criar_dashboard_analitico():
+    """Cria dashboard com métricas e analytics"""
+    if "resultados" not in st.session_state:
+        return
+    
+    st.markdown("---")
+    st.markdown("### 📊 Dashboard Analítico")
+    
+    resultados = st.session_state["resultados"]
+    logs = st.session_state.get("processed_logs", [])
+    
+    # Métricas principais
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_arquivos = len(resultados)
+        st.metric("📁 Arquivos Processados", total_arquivos)
+    
+    with col2:
+        total_paginas = sum(r.get('pages', 1) for r in resultados)
+        st.metric("📄 Total de Páginas", total_paginas)
+    
+    with col3:
+        sucessos = len([log for log in logs if log[2] == "OK"])
+        st.metric("✅ Sucessos", sucessos)
+    
+    with col4:
+        erros = len([log for log in logs if log[2] != "OK"])
+        st.metric("❌ Erros", erros)
+    
+    # Estatísticas por provedor
+    if logs:
+        st.markdown("#### 🔄 Uso dos Provedores")
+        provider_stats = {}
+        for log in logs:
+            if len(log) > 4 and log[4]:  # provider info
+                provider = log[4]
+                provider_stats[provider] = provider_stats.get(provider, 0) + 1
+        
+        for provider, count in provider_stats.items():
+            provider_class = f"provider-{provider.lower()}"
+            st.markdown(f"<span class='{provider_class}'>**{provider}**: {count} páginas</span>", unsafe_allow_html=True)
+    
+    # Estatísticas por emitente
+    if resultados:
+        st.markdown("#### 📈 Emitentes Mais Frequentes")
+        emitentes = {}
+        for r in resultados:
+            emitente = r.get('emitente', 'Desconhecido')
+            emitentes[emitente] = emitentes.get(emitente, 0) + 1
+        
+        for emitente, count in sorted(emitentes.items(), key=lambda x: x[1], reverse=True)[:5]:
+            st.write(f"{emitente}: {count} documento(s)")
+
+# =====================================================================
+# UPLOAD E PROCESSAMENTO
 # =====================================================================
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.markdown("### 📎 Enviar PDFs e processar (uma vez)")
@@ -229,7 +626,7 @@ if clear_session:
         if k in st.session_state:
             del st.session_state[k]
     st.success("Sessão limpa.")
-    st.rerun()  # CORRIGIDO
+    st.rerun()
 
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
@@ -253,6 +650,7 @@ if uploaded_files and process_btn:
             st.warning(f"Arquivo inválido: {a['name']}")
 
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
+    st.info(f"🔧 Provedores ativos: {[p['name'] for p in multi_ai.providers if p.get('enabled', True)]}")
 
     agrupados_bytes = {}
     resultados_meta = []
@@ -272,7 +670,7 @@ if uploaded_files and process_btn:
         try:
             reader = PdfReader(io.BytesIO(a["bytes"]))
         except Exception:
-            processed_logs.append((name, 0, "ERRO_LEITURA"))
+            processed_logs.append((name, 0, "ERRO_LEITURA", "", "Nenhum"))
             continue
 
         for idx, page in enumerate(reader.pages):
@@ -282,21 +680,27 @@ if uploaded_files and process_btn:
             w.write(b)
             b.seek(0)
 
-            dados, ok, tempo = chamar_gemini_retry(model, prompt, b)
+            # CHAMADA MULTI-IA COM FALLBACK
+            dados, ok, tempo, provider = multi_ai.process_pdf_page(prompt, b)
+            
             page_label = f"{name} (pág {idx+1})"
             if not ok or "error" in dados:
-                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados))))
+                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados)), provider))
                 progresso += 1
                 progress_bar.progress(min(progresso/total_paginas, 1.0))
-                progresso_text.markdown(f"<span class='log-warn'>⚠️ {page_label} — ERRO IA</span>", unsafe_allow_html=True)
+                progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA [{provider}]</span>", unsafe_allow_html=True)
                 resultados_meta.append({
                     "arquivo_origem": name,
                     "pagina": idx+1,
                     "emitente_detectado": dados.get("emitente") if isinstance(dados, dict) else "-",
                     "numero_detectado": dados.get("numero_nota") if isinstance(dados, dict) else "-",
-                    "status": "ERRO"
+                    "status": "ERRO",
+                    "provider": provider
                 })
                 continue
+
+            # Validar e corrigir dados
+            dados = validar_e_corrigir_dados(dados)
 
             emitente_raw = dados.get("emitente", "") or ""
             numero_raw = dados.get("numero_nota", "") or ""
@@ -309,19 +713,21 @@ if uploaded_files and process_btn:
             key = (numero, emitente)
             agrupados_bytes.setdefault(key, []).append(b.getvalue())
 
-            processed_logs.append((page_label, tempo, "OK", f"{numero} / {emitente}"))
+            provider_class = f"provider-{provider.lower()}" if provider else ""
+            processed_logs.append((page_label, tempo, "OK", f"{numero} / {emitente}", provider))
             resultados_meta.append({
                 "arquivo_origem": name,
                 "pagina": idx+1,
                 "emitente_detectado": emitente_raw,
                 "numero_detectado": numero_raw,
                 "status": "OK",
-                "tempo_s": round(tempo, 2)
+                "tempo_s": round(tempo, 2),
+                "provider": provider
             })
 
             progresso += 1
             progress_bar.progress(min(progresso/total_paginas, 1.0))
-            progresso_text.markdown(f"<span class='log-ok'>✅ {page_label} — OK ({tempo:.2f}s)</span>", unsafe_allow_html=True)
+            progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — OK ({tempo:.2f}s) <span class='{provider_class}'>[{provider}]</span></span>", unsafe_allow_html=True)
 
     resultados = []
     files_meta = {}
@@ -355,7 +761,11 @@ if uploaded_files and process_btn:
     st.session_state["files_meta"] = files_meta
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
-    st.rerun()  # CORRIGIDO
+    
+    # Mostrar dashboard após processamento
+    criar_dashboard_analitico()
+    
+    st.rerun()
 
 # =====================================================================
 # PAINEL CORPORATIVO
@@ -410,7 +820,7 @@ if "resultados" in st.session_state:
                         st.session_state["files_meta"].pop(f, None)
                     count += 1
                 st.success(f"{count} arquivo(s) excluído(s).")
-                st.rerun()  # CORRIGIDO
+                st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -456,7 +866,7 @@ if "resultados" in st.session_state:
         
         if action_col.button("⚙️ Gerenciar", key=f"manage_{fname}"):
             st.session_state["_manage_target"] = fname
-            st.rerun()  # CORRIGIDO
+            st.rerun()
 
         if action == "Remover (mover p/ lixeira)":
             src = session_folder / fname
@@ -469,7 +879,7 @@ if "resultados" in st.session_state:
             if fname in st.session_state.get("novos_nomes", {}):
                 st.session_state["novos_nomes"].pop(fname, None)
             st.success(f"{fname} removido.")
-            st.rerun()  # CORRIGIDO
+            st.rerun()
         elif action == "Baixar este arquivo":
             src = session_folder / fname
             if src.exists():
@@ -481,131 +891,20 @@ if "resultados" in st.session_state:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    manage_target = st.session_state.get("_manage_target")
-    if manage_target:
-        if not any(x["file"] == manage_target for x in st.session_state.get("resultados", [])):
-            st.session_state.pop("_manage_target", None)
-            st.rerun()  # CORRIGIDO
-        
-        st.markdown("<div class='card'>", unsafe_allow_html=True)
-        st.markdown(f"### ⚙️ Gerenciar: {manage_target}")
-        file_path = session_folder / manage_target
-        pages_list = []
-        try:
-            reader = PdfReader(str(file_path))
-            total_pages = len(reader.pages)
-            for pi in range(total_pages):
-                pages_list.append({"idx": pi, "label": f"Página {pi+1}"})
-        except Exception:
-            st.warning("Não foi possível ler o arquivo para gerenciamento.")
-            pages_list = []
+    # Dashboard analítico
+    criar_dashboard_analitico()
 
-        sel_key = f"_manage_sel_{manage_target}"
-        if sel_key not in st.session_state:
-            st.session_state[sel_key] = []
-
-        cols = st.columns([1, 4])
-        with cols[0]:
-            for p in pages_list:
-                checked = p["idx"] in st.session_state.get(sel_key, [])
-                cb = st.checkbox(p["label"], value=checked, key=f"{sel_key}_{p['idx']}")
-                if cb and p["idx"] not in st.session_state[sel_key]:
-                    st.session_state[sel_key].append(p["idx"])
-                if (not cb) and p["idx"] in st.session_state[sel_key]:
-                    st.session_state[sel_key].remove(p["idx"])
-
-        with cols[1]:
-            st.markdown("**Ações:**")
-            new_name_key = f"_manage_newname_{manage_target}"
-            if new_name_key not in st.session_state:
-                st.session_state[new_name_key] = f"{manage_target.rsplit('.pdf',1)[0]}_parte.pdf"
-            st.text_input("Nome do novo PDF (para Separar)", value=st.session_state[new_name_key], key=new_name_key)
-            col_sep, col_rem, col_save, col_close = st.columns([1,1,1,1])
-            with col_sep:
-                if st.button("➗ Separar páginas selecionadas", key=f"sep_{manage_target}"):
-                    selected = sorted(st.session_state.get(sel_key, []))
-                    if not selected:
-                        st.warning("Nenhuma página selecionada para separar.")
-                    else:
-                        new_name = st.session_state.get(new_name_key)
-                        new_path = session_folder / new_name
-                        w_new = PdfWriter()
-                        r = PdfReader(str(file_path))
-                        for idx in selected:
-                            if 0 <= idx < len(r.pages):
-                                w_new.add_page(r.pages[idx])
-                        with open(new_path, "wb") as nf:
-                            w_new.write(nf)
-                        new_meta = {"file": new_name, "numero": st.session_state["files_meta"].get(manage_target, {}).get("numero", ""), "emitente": st.session_state["files_meta"].get(manage_target, {}).get("emitente", ""), "pages": len(selected)}
-                        st.session_state["resultados"].append(new_meta)
-                        st.session_state["files_meta"][new_name] = {"numero": new_meta["numero"], "emitente": new_meta["emitente"], "pages": new_meta["pages"]}
-                        st.session_state["novos_nomes"][new_name] = new_name
-                        st.success(f"Arquivo separado criado: {new_name}")
-            with col_rem:
-                if st.button("🗑️ Remover páginas selecionadas do arquivo atual", key=f"rem_{manage_target}"):
-                    selected = sorted(st.session_state.get(sel_key, []))
-                    if not selected:
-                        st.warning("Nenhuma página selecionada para remover.")
-                    else:
-                        r = PdfReader(str(file_path))
-                        w_new = PdfWriter()
-                        for idx in range(len(r.pages)):
-                            if idx not in selected:
-                                w_new.add_page(r.pages[idx])
-                        if len(w_new.pages) == 0:
-                            try:
-                                os.remove(file_path)
-                            except Exception:
-                                pass
-                            st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != manage_target]
-                            st.session_state["files_meta"].pop(manage_target, None)
-                            st.session_state["novos_nomes"].pop(manage_target, None)
-                            st.success(f"{manage_target} ficou vazio e foi excluído.")
-                            st.session_state.pop(sel_key, None)
-                            st.session_state.pop("_manage_target", None)
-                            st.rerun()  # CORRIGIDO
-                        else:
-                            with open(file_path, "wb") as f_out:
-                                w_new.write(f_out)
-                            st.session_state["files_meta"][manage_target]["pages"] = len(w_new.pages)
-                            for ent in st.session_state["resultados"]:
-                                if ent["file"] == manage_target:
-                                    ent["pages"] = len(w_new.pages)
-                            st.success("Páginas removidas com sucesso.")
-                            st.session_state[sel_key] = []
-                            st.rerun()  # CORRIGIDO
-            with col_save:
-                if st.button("💾 Salvar alterações e atualizar painel", key=f"save_{manage_target}"):
-                    if (session_folder / manage_target).exists():
-                        try:
-                            r = PdfReader(str(session_folder / manage_target))
-                            st.session_state["files_meta"][manage_target]["pages"] = len(r.pages)
-                            for ent in st.session_state["resultados"]:
-                                if ent["file"] == manage_target:
-                                    ent["pages"] = len(r.pages)
-                        except Exception:
-                            pass
-                    st.session_state["novos_nomes"] = st.session_state.get("novos_nomes", {})
-                    st.success("Alterações salvas.")
-                    st.session_state.pop(sel_key, None)
-                    st.session_state.pop("_manage_target", None)
-                    st.rerun()  # CORRIGIDO
-            with col_close:
-                if st.button("Fechar", key=f"close_{manage_target}"):
-                    st.session_state.pop("_manage_target", None)
-                    st.rerun()  # CORRIGIDO
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
+    # Mostrar logs se solicitado
     if show_logs and st.session_state.get("processed_logs"):
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("### 📝 Logs de processamento (últimas páginas)")
         for entry in st.session_state["processed_logs"][-200:]:
-            label, t, status, info = (entry + ("", ""))[:4]
+            label, t, status, info, provider = (entry + ("", "", ""))[:5]
+            provider_class = f"provider-{provider.lower()}" if provider else ""
             if status == "OK":
-                st.markdown(f"<div class='log-ok'>✅ {label} — {info} — {t:.2f}s</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='success-log'>✅ {label} — {info} — {t:.2f}s <span class='{provider_class}'>[{provider}]</span></div>", unsafe_allow_html=True)
             else:
-                st.markdown(f"<div class='log-warn'>⚠️ {label} — {info}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='warning-log'>⚠️ {label} — {info} <span class='{provider_class}'>[{provider}]</span></div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.session_state["novos_nomes"] = novos_nomes
