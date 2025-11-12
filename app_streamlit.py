@@ -235,7 +235,7 @@ if clear_session:
         if k in st.session_state:
             del st.session_state[k]
     st.success("Sessão limpa.")
-    st.rerun()
+    st.experimental_rerun()
 
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
@@ -425,7 +425,7 @@ if "resultados" in st.session_state:
                         st.session_state["files_meta"].pop(f, None)
                     count += 1
                 st.success(f"{count} arquivo(s) excluído(s).")
-                st.rerun()
+                st.experimental_rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -479,7 +479,7 @@ if "resultados" in st.session_state:
         if action_col.button("⚙️ Gerenciar", key=f"manage_{fname}"):
             # set manage target in session state and rerun to open below
             st.session_state["_manage_target"] = fname
-            st.rerun()
+            st.experimental_rerun()
 
         if action == "Remover (mover p/ lixeira)":
             # remove file
@@ -493,7 +493,7 @@ if "resultados" in st.session_state:
             if fname in st.session_state.get("novos_nomes", {}):
                 st.session_state["novos_nomes"].pop(fname, None)
             st.success(f"{fname} removido.")
-            st.rerun()
+            st.experimental_rerun()
         elif action == "Baixar este arquivo":
             src = session_folder / fname
             if src.exists():
@@ -512,7 +512,7 @@ if "resultados" in st.session_state:
         # check that file still exists in resultados
         if not any(x["file"] == manage_target for x in st.session_state.get("resultados", [])):
             st.session_state.pop("_manage_target", None)
-            st.rerun()
+            st.experimental_rerun()
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.markdown(f"### ⚙️ Gerenciar: {manage_target}")
         file_path = session_folder / manage_target
@@ -600,7 +600,7 @@ if "resultados" in st.session_state:
                             # clear manage selection and rerun
                             st.session_state.pop(sel_key, None)
                             st.session_state.pop("_manage_target", None)
-                            st.rerun()
+                            st.experimental_rerun()
                         else:
                             # overwrite file
                             with open(file_path, "wb") as f_out:
@@ -614,7 +614,7 @@ if "resultados" in st.session_state:
                             st.success("Páginas removidas com sucesso.")
                             # clear selected pages
                             st.session_state[sel_key] = []
-                            st.rerun()
+                            st.experimental_rerun()
             with col_save:
                 if st.button("💾 Salvar alterações e atualizar painel", key=f"save_{manage_target}"):
                     # Ensure current file still exists (may have been changed)
@@ -633,11 +633,11 @@ if "resultados" in st.session_state:
                     # clear manage target and selections, then rerun to reflect changes
                     st.session_state.pop(sel_key, None)
                     st.session_state.pop("_manage_target", None)
-                    st.rerun()
+                    st.experimental_rerun()
             with col_close:
                 if st.button("Fechar", key=f"close_{manage_target}"):
                     st.session_state.pop("_manage_target", None)
-                    st.rerun()
+                    st.experimental_rerun()
 
         st.markdown("</div>", unsafe_allow_html=True)
 
