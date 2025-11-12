@@ -871,3 +871,47 @@ if "resultados" in st.session_state:
 
 else:
     st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
+  # ==============================
+# 🔧 GERENCIAR PDF SELECIONADO
+# ==============================
+if "_manage_target" in st.session_state:
+    target_file = st.session_state["_manage_target"]
+    target_path = os.path.join(output_dir, target_file)
+
+    st.markdown("---")
+    st.subheader(f"⚙️ Gerenciando: `{target_file}`")
+
+    # Mostrar o PDF
+    with open(target_path, "rb") as f:
+        pdf_bytes = f.read()
+        st.download_button("⬇️ Baixar PDF", pdf_bytes, file_name=target_file)
+        st.pdf_viewer(target_path)
+
+    # Botão para remover o modo "gerenciar"
+    if st.button("⬅️ Voltar"):
+        del st.session_state["_manage_target"]
+        st.rerun()
+
+    st.markdown("### 🧩 Separar páginas")
+    from PyPDF2 import PdfReader, PdfWriter
+
+    pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
+    num_pages = len(pdf_reader.pages)
+
+    st.info(f"O PDF tem **{num_pages} páginas**.")
+    start_page = st.number_input("Página inicial", min_value=1, max_value=num_pages, value=1)
+    end_page = st.number_input("Página final", min_value=1, max_value=num_pages, value=num_pages)
+
+    if st.button("✂️ Separar e salvar nova nota"):
+        if start_page <= end_page:
+            writer = PdfWriter()
+            for i in range(start_page - 1, end_page):
+                writer.add_page(pdf_reader.pages[i])
+            new_name = f"{Path(target_file).stem}_paginas_{start_page}-{end_page}.pdf"
+            new_path = os.path.join(output_dir, new_name)
+            with open(new_path, "wb") as nf:
+                writer.write(nf)
+            st.success(f"✅ Novo PDF salvo: `{new_name}`")
+        else:
+            st.error("Página inicial não pode ser maior que a final.")
+
