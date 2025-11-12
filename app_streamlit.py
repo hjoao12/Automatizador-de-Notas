@@ -82,6 +82,7 @@ div.stButton > button:hover {
 }
 .card { background: #fff; padding: 12px; border-radius:8px; box-shadow: 0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
 .metric-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; }
+.manage-panel { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0f4c81; margin: 10px 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -366,7 +367,7 @@ if clear_session:
             shutil.rmtree(st.session_state["session_folder"])
         except Exception:
             pass
-    for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files"]:
+    for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
         if k in st.session_state:
             del st.session_state[k]
     st.success("Sessão limpa.")
@@ -527,7 +528,7 @@ if uploaded_files and process_btn:
     st.rerun()
 
 # =====================================================================
-# PAINEL CORPORATIVO
+# PAINEL CORPORATIVO - COM SISTEMA DE GERENCIAMENTO CORRIGIDO
 # =====================================================================
 if "resultados" in st.session_state:
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -598,6 +599,8 @@ if "resultados" in st.session_state:
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 🗂 Notas processadas")
+    
+    # Inicializar selected_files se não existir
     if "selected_files" not in st.session_state:
         st.session_state["selected_files"] = []
 
@@ -623,6 +626,7 @@ if "resultados" in st.session_state:
         action_col = cols[3]
         action = action_col.selectbox("", options=["...", "Remover (mover p/ lixeira)", "Baixar este arquivo"], key=f"action_{fname}", index=0)
         
+        # Botão Gerenciar - CORRIGIDO
         if action_col.button("⚙️ Gerenciar", key=f"manage_{fname}"):
             st.session_state["_manage_target"] = fname
             st.rerun()
@@ -637,6 +641,8 @@ if "resultados" in st.session_state:
             st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != fname]
             if fname in st.session_state.get("novos_nomes", {}):
                 st.session_state["novos_nomes"].pop(fname, None)
+            if fname in st.session_state.get("files_meta", {}):
+                st.session_state["files_meta"].pop(fname, None)
             st.success(f"{fname} removido.")
             st.rerun()
         elif action == "Baixar este arquivo":
@@ -649,6 +655,169 @@ if "resultados" in st.session_state:
                 st.warning("Arquivo não encontrado.")
 
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # =====================================================================
+    # PAINEL DE GERENCIAMENTO - CORRIGIDO
+    # =====================================================================
+    if "_manage_target" in st.session_state:
+        manage_target = st.session_state["_manage_target"]
+        
+        # Verificar se o arquivo ainda existe
+        if not any(r["file"] == manage_target for r in st.session_state.get("resultados", [])):
+            st.session_state.pop("_manage_target", None)
+            st.rerun()
+        
+        st.markdown('<div class="manage-panel">', unsafe_allow_html=True)
+        st.markdown(f"### ⚙️ Gerenciar: `{manage_target}`")
+        
+        file_path = session_folder / manage_target
+        
+        # Obter informações das páginas
+        try:
+            reader = PdfReader(str(file_path))
+            total_pages = len(reader.pages)
+            pages_info = [{"idx": i, "label": f"Página {i+1}"} for i in range(total_pages)]
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo: {str(e)}")
+            pages_info = []
+            total_pages = 0
+        
+        if pages_info:
+            st.info(f"📄 O arquivo possui **{total_pages} página(s)**")
+            
+            # Inicializar seleção de páginas
+            sel_key = f"_manage_sel_{manage_target}"
+            if sel_key not in st.session_state:
+                st.session_state[sel_key] = []
+            
+            col_sel, col_actions = st.columns([1, 2])
+            
+            with col_sel:
+                st.markdown("**Selecionar páginas:**")
+                for page in pages_info:
+                    is_checked = page["idx"] in st.session_state.get(sel_key, [])
+                    if st.checkbox(page["label"], value=is_checked, key=f"{sel_key}_{page['idx']}"):
+                        if page["idx"] not in st.session_state[sel_key]:
+                            st.session_state[sel_key].append(page["idx"])
+                    else:
+                        if page["idx"] in st.session_state[sel_key]:
+                            st.session_state[sel_key].remove(page["idx"])
+            
+            with col_actions:
+                st.markdown("**Ações:**")
+                
+                selected_count = len(st.session_state.get(sel_key, []))
+                st.write(f"📑 Páginas selecionadas: **{selected_count}**")
+                
+                # Nome para novo arquivo
+                new_name_key = f"_manage_newname_{manage_target}"
+                if new_name_key not in st.session_state:
+                    base_name = manage_target.rsplit('.pdf', 1)[0]
+                    st.session_state[new_name_key] = f"{base_name}_parte.pdf"
+                
+                new_name = st.text_input("Nome do novo PDF:", 
+                                       value=st.session_state[new_name_key],
+                                       key=new_name_key)
+                
+                col_sep, col_rem, col_close = st.columns(3)
+                
+                with col_sep:
+                    if st.button("➗ Separar páginas", key=f"sep_{manage_target}"):
+                        selected = sorted(st.session_state.get(sel_key, []))
+                        if not selected:
+                            st.warning("Selecione pelo menos uma página para separar.")
+                        else:
+                            try:
+                                # Criar novo PDF com páginas selecionadas
+                                new_writer = PdfWriter()
+                                reader = PdfReader(str(file_path))
+                                
+                                for page_idx in selected:
+                                    if 0 <= page_idx < len(reader.pages):
+                                        new_writer.add_page(reader.pages[page_idx])
+                                
+                                # Salvar novo arquivo
+                                new_path = session_folder / new_name
+                                with open(new_path, "wb") as f:
+                                    new_writer.write(f)
+                                
+                                # Adicionar aos resultados
+                                new_meta = {
+                                    "file": new_name,
+                                    "numero": files_meta.get(manage_target, {}).get("numero", ""),
+                                    "emitente": files_meta.get(manage_target, {}).get("emitente", ""),
+                                    "pages": len(selected)
+                                }
+                                
+                                st.session_state["resultados"].append(new_meta)
+                                st.session_state["files_meta"][new_name] = {
+                                    "numero": new_meta["numero"],
+                                    "emitente": new_meta["emitente"], 
+                                    "pages": new_meta["pages"]
+                                }
+                                st.session_state["novos_nomes"][new_name] = new_name
+                                
+                                st.success(f"✅ Arquivo separado criado: `{new_name}`")
+                                st.session_state[sel_key] = []  # Limpar seleção
+                                
+                            except Exception as e:
+                                st.error(f"❌ Erro ao separar páginas: {str(e)}")
+                
+                with col_rem:
+                    if st.button("🗑️ Remover páginas", key=f"rem_{manage_target}"):
+                        selected = sorted(st.session_state.get(sel_key, []))
+                        if not selected:
+                            st.warning("Selecione páginas para remover.")
+                        else:
+                            try:
+                                # Criar novo PDF sem as páginas selecionadas
+                                new_writer = PdfWriter()
+                                reader = PdfReader(str(file_path))
+                                
+                                for page_idx in range(len(reader.pages)):
+                                    if page_idx not in selected:
+                                        new_writer.add_page(reader.pages[page_idx])
+                                
+                                # Se sobrou alguma página, salvar o arquivo
+                                if len(new_writer.pages) > 0:
+                                    with open(file_path, "wb") as f:
+                                        new_writer.write(f)
+                                    
+                                    # Atualizar metadados
+                                    st.session_state["files_meta"][manage_target]["pages"] = len(new_writer.pages)
+                                    for r in st.session_state["resultados"]:
+                                        if r["file"] == manage_target:
+                                            r["pages"] = len(new_writer.pages)
+                                    
+                                    st.success(f"✅ {len(selected)} página(s) removida(s)")
+                                else:
+                                    # Se não sobrou nenhuma página, excluir o arquivo
+                                    file_path.unlink()
+                                    st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != manage_target]
+                                    st.session_state["files_meta"].pop(manage_target, None)
+                                    st.session_state["novos_nomes"].pop(manage_target, None)
+                                    st.success(f"📭 Arquivo `{manage_target}` foi excluído (ficou vazio)")
+                                    st.session_state.pop("_manage_target", None)
+                                
+                                st.session_state[sel_key] = []  # Limpar seleção
+                                st.rerun()
+                                
+                            except Exception as e:
+                                st.error(f"❌ Erro ao remover páginas: {str(e)}")
+                
+                with col_close:
+                    if st.button("❌ Fechar", key=f"close_{manage_target}"):
+                        st.session_state.pop("_manage_target", None)
+                        st.session_state.pop(sel_key, None)
+                        st.rerun()
+        
+        else:
+            st.warning("Não foi possível carregar as páginas do arquivo.")
+            if st.button("❌ Fechar", key=f"close_err_{manage_target}"):
+                st.session_state.pop("_manage_target", None)
+                st.rerun()
+        
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # Dashboard analítico
     criar_dashboard_analitico()
