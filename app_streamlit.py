@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 st.set_page_config(page_title="Automatizador de Notas Fiscais", page_icon="🧾", layout="wide")
 
-# ======= CSS Corporativo Claro =======
+# CSS corporativo claro
 st.markdown("""
 <style>
 body { background-color: #f8f9fa; color: #212529; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
@@ -29,19 +29,18 @@ h1,h2,h3,h4 { color: #0f4c81; }
 div.stButton > button { background-color: #0f4c81; color: white; border-radius: 8px; border: none; font-weight: 500; }
 div.stButton > button:hover { background-color: #0b3a5a; }
 .stProgress > div > div > div > div { background-color: #28a745 !important; }
-.success-log { color: #155724; background-color: #d4edda; padding:6px 10px; border-radius:6px; }
-.warning-log { color: #856404; background-color: #fff3cd; padding:6px 10px; border-radius:6px; }
-.error-log { color: #721c24; background-color: #f8d7da; padding:6px 10px; border-radius:6px; }
-.top-actions { display:flex; gap:10px; align-items:center; }
-.block-container { padding-top:2rem; }
+.success-log { color: #155724; background-color: #d4edda; padding: 6px 10px; border-radius: 6px; }
+.warning-log { color: #856404; background-color: #fff3cd; padding: 6px 10px; border-radius: 6px; }
+.error-log { color: #721c24; background-color: #f8d7da; padding: 6px 10px; border-radius: 6px; }
+.block-container { padding-top: 2rem; }
 .small-note { font-size:13px; color:#6b7280; }
-.card { background:#fff; padding:12px; border-radius:8px; box-shadow:0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
+.card { background: #fff; padding: 12px; border-radius:8px; box-shadow: 0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🧠 Automatizador de Notas Fiscais PDF")
 
-# ===== Variáveis de configuração =====
+# Configs básicas
 TEMP_FOLDER = Path("./temp")
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
@@ -50,15 +49,14 @@ MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
 MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
 
+# Configura Gemini
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GEMINI_API_KEY:
     st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
     st.stop()
-
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(MODEL_NAME)
 
-st.markdown("<div class='muted'>Conectando ao modelo...</div>", unsafe_allow_html=True)
 try:
     _ = model.name
     st.success("✅ Google Gemini configurado.")
@@ -66,7 +64,7 @@ except Exception:
     st.warning("⚠️ Problema ao conectar com Gemini — verifique a variável de ambiente GOOGLE_API_KEY.")
 
 # =====================================================================
-# FUNÇÕES UTILITÁRIAS
+# Normalização e substituições
 # =====================================================================
 SUBSTITUICOES_FIXAS = {
     "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
@@ -113,7 +111,7 @@ def limpar_numero(numero: str) -> str:
     return numero.lstrip("0") or "0"
 
 # =====================================================================
-# RETRY GEMINI
+# Retry Gemini
 # =====================================================================
 def calcular_delay(tentativa, error_msg):
     if "retry in" in error_msg.lower():
@@ -151,11 +149,16 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
     return {"error": "Falha máxima de tentativas"}, False, 0
 
 # =====================================================================
-# UPLOAD E PROCESSAMENTO
+# Upload e Processamento
 # =====================================================================
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.markdown("### 📎 Enviar PDFs e processar (uma vez)")
-uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True, key="uploader")
+uploaded_files = st.file_uploader(
+    "Selecione arquivos PDF",
+    type=["pdf"],
+    accept_multiple_files=True,
+    key="uploader"
+)
 col_up_a, col_up_b = st.columns([1,1])
 with col_up_a:
     process_btn = st.button("🚀 Processar PDFs")
@@ -163,111 +166,115 @@ with col_up_b:
     clear_session = st.button("♻️ Limpar sessão (apagar temporários)")
 st.markdown("</div>", unsafe_allow_html=True)
 
-# Clear session
+# Limpar sessão
 if clear_session:
     if "session_folder" in st.session_state:
-        try: shutil.rmtree(st.session_state["session_folder"])
-        except: pass
-    for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files"]:
+        try:
+            shutil.rmtree(st.session_state["session_folder"])
+        except Exception:
+            pass
+    for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
         st.session_state.pop(k, None)
     st.success("Sessão limpa.")
-    st.session_state["_needs_rerun"] = True
+    st.stop()
 
-# Process PDFs
+# Inicialização de session_state
+for key in ["resultados", "processed_logs", "files_meta", "novos_nomes", "selected_files"]:
+    if key not in st.session_state:
+        st.session_state[key] = []
+
+# Processamento
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
+    st.session_state["session_folder"] = str(session_folder)
 
-    arquivos = []
-    for f in uploaded_files:
-        try: arquivos.append({"name": f.name, "bytes": f.read()})
-        except: st.warning(f"Erro ao ler {f.name}, ignorado.")
+    arquivos = [{"name": f.name, "bytes": f.read()} for f in uploaded_files]
 
-    total_paginas = 0
-    for a in arquivos:
-        try: total_paginas += len(PdfReader(io.BytesIO(a["bytes"])).pages)
-        except: st.warning(f"Arquivo inválido: {a['name']}")
+    total_paginas = sum(len(PdfReader(io.BytesIO(a["bytes"])).pages) for a in arquivos)
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
 
     agrupados_bytes = {}
-    resultados_meta = []
-    processed_logs = []
     progresso = 0
     progress_bar = st.progress(0.0)
     progresso_text = st.empty()
     start_all = time.time()
-    prompt = "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+
+    prompt = (
+        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
+        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+    )
 
     for a in arquivos:
         name = a["name"]
-        try: reader = PdfReader(io.BytesIO(a["bytes"]))
-        except:
-            processed_logs.append((name, 0, "ERRO_LEITURA"))
+        try:
+            reader = PdfReader(io.BytesIO(a["bytes"]))
+        except Exception:
+            st.session_state["processed_logs"].append((name, 0, "ERRO_LEITURA"))
             continue
+
         for idx, page in enumerate(reader.pages):
             b = io.BytesIO()
-            writer = PdfWriter()
-            writer.add_page(page)
-            writer.write(b)
+            w = PdfWriter()
+            w.add_page(page)
+            w.write(b)
             b.seek(0)
 
             dados, ok, tempo = chamar_gemini_retry(model, prompt, b)
             page_label = f"{name} (pág {idx+1})"
+
             if not ok or "error" in dados:
-                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados))))
-                resultados_meta.append({
-                    "arquivo_origem": name, "pagina": idx+1,
+                st.session_state["processed_logs"].append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados))))
+                progresso += 1
+                progress_bar.progress(min(progresso/total_paginas, 1.0))
+                progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA</span>", unsafe_allow_html=True)
+                st.session_state["resultados"].append({
+                    "arquivo_origem": name,
+                    "pagina": idx+1,
                     "emitente_detectado": dados.get("emitente") if isinstance(dados, dict) else "-",
                     "numero_detectado": dados.get("numero_nota") if isinstance(dados, dict) else "-",
                     "status": "ERRO"
                 })
-            else:
-                emitente_raw = dados.get("emitente", "") or ""
-                numero_raw = dados.get("numero_nota", "") or ""
-                cidade_raw = dados.get("cidade", "") or ""
-                numero = limpar_numero(numero_raw)
-                nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
-                emitente = limpar_emitente(nome_map)
-                key = (numero, emitente)
-                agrupados_bytes.setdefault(key, []).append(b.getvalue())
-                processed_logs.append((page_label, tempo, "OK", f"{numero} / {emitente}"))
-                resultados_meta.append({
-                    "arquivo_origem": name, "pagina": idx+1,
-                    "emitente_detectado": emitente_raw, "numero_detectado": numero_raw,
-                    "status": "OK", "tempo_s": round(tempo, 2)
-                })
+                continue
+
+            emitente_raw = dados.get("emitente", "") or ""
+            numero_raw = dados.get("numero_nota", "") or ""
+            cidade_raw = dados.get("cidade", "") or ""
+            numero = limpar_numero(numero_raw)
+            nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
+            emitente = limpar_emitente(nome_map)
+
+            key = (numero, emitente)
+            agrupados_bytes.setdefault(key, []).append(b.getvalue())
+
+            st.session_state["processed_logs"].append((page_label, tempo, "OK", f"{numero} / {emitente}"))
+            st.session_state["resultados"].append({
+                "arquivo_origem": name,
+                "pagina": idx+1,
+                "emitente_detectado": emitente_raw,
+                "numero_detectado": numero_raw,
+                "status": "OK",
+                "tempo_s": round(tempo, 2)
+            })
 
             progresso += 1
-            progress_bar.progress(min(progresso/total_paginas,1.0))
-            progresso_text.markdown(f"<span class='log-ok'>✅ {page_label} — {tempo:.2f}s</span>" if ok else f"<span class='log-warn'>⚠️ {page_label} — ERRO IA</span>", unsafe_allow_html=True)
+            progress_bar.progress(min(progresso/total_paginas, 1.0))
+            progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — OK ({tempo:.2f}s)</span>", unsafe_allow_html=True)
 
-    # write final grouped PDFs
-    resultados = []
-    files_meta = {}
+    # gerar PDFs finais
     for (numero, emitente), pages_bytes in agrupados_bytes.items():
         if not numero or numero == "0": continue
         writer = PdfWriter()
         for pb in pages_bytes:
-            try: [writer.add_page(p) for p in PdfReader(io.BytesIO(pb)).pages]
-            except: continue
+            r = PdfReader(io.BytesIO(pb))
+            for p in r.pages:
+                writer.add_page(p)
         nome_pdf = f"DOC {numero}_{emitente}.pdf"
         caminho = session_folder / nome_pdf
-        with open(caminho, "wb") as f_out: writer.write(f_out)
-        resultados.append({"file": nome_pdf, "numero": numero, "emitente": emitente, "pages": len(pages_bytes)})
-        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": len(pages_bytes)}
+        with open(caminho, "wb") as f_out:
+            writer.write(f_out)
+        st.session_state["files_meta"][nome_pdf] = {"numero": numero, "emitente": emitente, "pages": len(pages_bytes)}
+        st.session_state["novos_nomes"][nome_pdf] = nome_pdf
 
-    st.session_state["resultados"] = resultados
-    st.session_state["session_folder"] = str(session_folder)
-    st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
-    st.session_state["processed_logs"] = processed_logs
-    st.session_state["files_meta"] = files_meta
-    st.success(f"✅ Processamento concluído em {round(time.time()-start_all,2)}s — {len(resultados)} arquivos gerados.")
-    st.session_state["_needs_rerun"] = True
-
-# =====================================================================
-# CONTROLADOR DE RERUN
-# =====================================================================
-if st.session_state.get("_needs_rerun"):
-    st.session_state["_needs_rerun"] = False
-    st.experimental_rerun()
+    st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(agrupados_bytes)} arquivos gerados.")
