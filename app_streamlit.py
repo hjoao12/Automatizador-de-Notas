@@ -28,7 +28,7 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
 MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 REQUEST_DELAY = int(os.getenv("REQUEST_DELAY", "2"))
-MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.0-flash")
+MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
 
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GEMINI_API_KEY:
