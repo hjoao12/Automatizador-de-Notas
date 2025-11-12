@@ -100,13 +100,13 @@ MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-1.5-flash") # Modelo mais le
 
 # Constante do Prompt de Instrução (Para melhor organização)
 PROMPT_INSTRUCAO_GEMINI = (
-"Você é um especialista em análise de notas fiscais DANFE."
-"Extraia APENAS estes 3 campos do documento:"
-"1. emitente (nome da empresa que emitiu a nota)"
-"2. numero_nota (número da nota fiscal)"
-"3. cidade (cidade do emitente)"
-"Responda EXCLUSIVAMENTE em JSON válido: {\"emitente\":\"...\",\"numero_nota\":\"...\",\"cidade\":\"...\"}"
-"Se algum campo não for encontrado, use string vazia \"\"."
+    "Você é um especialista em análise de notas fiscais DANFE. "
+    "Extraia APENAS estes 3 campos do documento: "
+    "1. emitente (nome da empresa que emitiu a nota) "
+    "2. numero_nota (número da nota fiscal) " 
+    "3. cidade (cidade do emitente) "
+    "Responda EXCLUSIVAMENTE em JSON válido: {\"emitente\":\"...\",\"numero_nota\":\"...\",\"cidade\":\"...\"}"
+    "Se algum campo não for encontrado, use string vazia \"\"."
 )
 
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
