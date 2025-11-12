@@ -1,4 +1,4 @@
-import os
+import os 
 import io
 import time
 import json
@@ -19,7 +19,6 @@ import openai
 from openai import OpenAI
 import requests
 import base64
-import fitz  # PyMuPDF (NOVA IMPORTAÇÃO)
 
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
@@ -139,167 +138,139 @@ class DocumentCache:
 document_cache = DocumentCache()
 
 # =====================================================================
-# MULTI-IA COM FALLBACK (CORRIGIDO COM VISÃO)
+# SISTEMA MULTI-IA COM FALLBACK
 # =====================================================================
 class MultiAIProvider:
     def __init__(self):
         self.providers = self._setup_providers()
         self.active_provider = None
         self.stats = {p['name']: {'success': 0, 'errors': 0, 'total_time': 0} for p in self.providers}
-
-    # --------------------------
-    # Configuração dos provedores
-    # --------------------------
+        
     def _setup_providers(self):
         providers = []
+        
+        # 1. Google Gemini (Primário)
         if os.getenv("GOOGLE_API_KEY"):
             try:
                 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-                # Certifique-se de que é um modelo com visão (Flash e Pro são)
-                model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-1.5-flash"))
-                providers.append({'name': 'Gemini', 'model': model, 'type': 'gemini', 'priority': 1, 'enabled': True})
+                model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
+                providers.append({
+                    'name': 'Gemini',
+                    'model': model,
+                    'type': 'gemini',
+                    'priority': 1,
+                    'enabled': True
+                })
                 st.sidebar.success("✅ Gemini configurado")
             except Exception as e:
-                st.sidebar.warning(f"⚠️ Gemini não configurado: {e}")
-
+                st.sidebar.warning(f"⚠️ Gemini não configurado")
+        
+        # 2. OpenAI ChatGPT
         if os.getenv("OPENAI_API_KEY"):
             try:
                 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                # Certifique-se de usar um modelo de VISÃO (gpt-4o, gpt-4-turbo)
-                providers.append({'name': 'OpenAI', 'client': openai_client, 'type': 'openai', 'model': os.getenv("OPENAI_MODEL", "gpt-4o"), 'priority': 2, 'enabled': True})
+                providers.append({
+                    'name': 'OpenAI',
+                    'client': openai_client,
+                    'type': 'openai',
+                    'model': os.getenv("OPENAI_MODEL", "gpt-4o"),
+                    'priority': 2,
+                    'enabled': True
+                })
                 st.sidebar.success("✅ OpenAI configurado")
             except Exception as e:
-                st.sidebar.warning(f"⚠️ OpenAI não configurado: {e}")
-
+                st.sidebar.warning(f"⚠️ OpenAI não configurado")
+        
+        # 3. DeepSeek
         if os.getenv("DEEPSEEK_API_KEY"):
             try:
-                # Certifique-se de que o modelo suporta visão
-                providers.append({'name': 'DeepSeek', 'api_key': os.getenv("DEEPSEEK_API_KEY"), 'type': 'deepseek', 'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"), 'priority': 3, 'enabled': True})
+                providers.append({
+                    'name': 'DeepSeek',
+                    'api_key': os.getenv("DEEPSEEK_API_KEY"),
+                    'type': 'deepseek',
+                    'model': os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+                    'priority': 3,
+                    'enabled': True
+                })
                 st.sidebar.success("✅ DeepSeek configurado")
             except Exception as e:
-                st.sidebar.warning(f"⚠️ DeepSeek não configurado: {e}")
-
+                st.sidebar.warning(f"⚠️ DeepSeek não configurado")
+        
+        # 4. Anthropic Claude (opcional)
         if os.getenv("ANTHROPIC_API_KEY"):
             try:
-                # Certifique-se de que o modelo suporta visão (Sonnet 3.5, Opus 3)
-                providers.append({'name': 'Claude', 'api_key': os.getenv("ANTHROPIC_API_KEY"), 'type': 'claude', 'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20240620"), 'priority': 4, 'enabled': True})
+                providers.append({
+                    'name': 'Claude',
+                    'api_key': os.getenv("ANTHROPIC_API_KEY"),
+                    'type': 'claude',
+                    'model': os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
+                    'priority': 4,
+                    'enabled': True
+                })
                 st.sidebar.success("✅ Claude configurado")
             except Exception as e:
-                st.sidebar.warning(f"⚠️ Claude não configurado: {e}")
-
-        if not providers:
-            st.error("❌ Nenhum provedor de IA configurado.")
-            st.stop()
-
-        return sorted(providers, key=lambda x: x['priority'])
-
-    # --------------------------
-    # Função auxiliar: Converter página PDF em Imagem Base64
-    # --------------------------
-    def _pdf_page_to_base64_image(self, page_stream):
-        """Converte um stream de bytes de uma página PDF em uma imagem base64"""
-        doc = None
-        try:
-            # Abre o PDF a partir dos bytes
-            doc = fitz.open(stream=page_stream.getvalue(), filetype="pdf")
-            page = doc.load_page(0)  # Carrega a primeira (e única) página
-            
-            # Renderiza a página para uma imagem (pixmap)
-            # Usamos um DPI (dots per inch) razoável para OCR
-            pix = page.get_pixmap(dpi=200)
-            
-            # Converte a imagem para bytes (PNG)
-            img_bytes = pix.tobytes("png")
-            
-            # Codifica os bytes em base64
-            base64_image = base64.b64encode(img_bytes).decode('utf-8')
-            return base64_image, "image/png"
+                st.sidebar.warning(f"⚠️ Claude não configurado")
         
-        except Exception as e:
-            st.sidebar.error(f"Erro ao renderizar PDF: {e}")
-            raise  # Re-lança a exceção para o loop de fallback
-        finally:
-            if doc:
-                doc.close()
-
-    # --------------------------
-    # Processamento com fallback
-    # --------------------------
+        if not providers:
+            st.error("❌ Nenhum provedor de IA configurado. Configure pelo menos uma chave API.")
+            st.stop()
+            
+        return sorted(providers, key=lambda x: x['priority'])
+    
     def process_pdf_page(self, prompt_instrucao, page_stream, max_retries=2):
-        """Processa uma página de PDF com fallback automático entre provedores"""
+        # Verificar cache primeiro
         cache_key = document_cache.get_cache_key(page_stream.getvalue(), prompt_instrucao)
         cached_result = document_cache.get(cache_key)
         if cached_result and st.session_state.get("use_cache", True):
-            st.sidebar.info("💾 Usando cache salvo")
+            st.sidebar.info("💾 Usando cache")
             return cached_result['dados'], True, cached_result['tempo'], cached_result['provider']
-
+        
         last_error = None
         
-        # Leitura dos provedores ativos a partir do st.session_state (do sidebar)
-        active_providers = [
-            p for p in self.providers
-            if st.session_state.get(f"provider_{p['name']}", p.get('enabled', True))
-        ]
-
-        for provider in active_providers:
-            inicio = time.time()
-            st.sidebar.info(f"🔄 Tentando {provider['name']}...")
-
-            try:
-                # ---- GEMINI ----
-                if provider['type'] == 'gemini':
-                    dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
-                # ---- OPENAI ----
-                elif provider['type'] == 'openai':
-                    dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
-                # ---- DEEPSEEK ----
-                elif provider['type'] == 'deepseek':
-                    dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
-                # ---- CLAUDE ----
-                elif provider['type'] == 'claude':
-                    dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
-                else:
-                    continue
-
-                # Sucesso — salva no cache e retorna imediatamente
-                self.stats[provider['name']]['success'] += 1
-                self.stats[provider['name']]['total_time'] += tempo
-                self.active_provider = provider['name']
-
-                document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider['name']})
-                return dados, True, tempo, provider['name']
-
-            except ResourceExhausted:
-                tempo_falha = round(time.time() - inicio, 2)
-                last_error = f"{provider['name']} — cota esgotada ({tempo_falha:.2f}s)"
-                self.stats[provider['name']]['errors'] += 1
-                st.sidebar.warning(f"⚠️ {last_error}. Indo para o próximo provedor...")
+        for provider in self.providers:
+            if not provider.get('enabled', True):
                 continue
+                
+            st.sidebar.info(f"🔄 Tentando com {provider['name']}...")
             
-            except json.JSONDecodeError as e:
-                # Tratamento para JSON inválido
-                tempo_falha = round(time.time() - inicio, 2)
-                last_error = f"{provider['name']} falhou em {tempo_falha:.2f}s — JSON inválido ({e})"
-                self.stats[provider['name']]['errors'] += 1
-                st.sidebar.warning(f"⚠️ {last_error}. Tentando próximo provedor...")
-                continue
-
-            except Exception as e:
-                tempo_falha = round(time.time() - inicio, 2)
-                last_error = f"{provider['name']} falhou em {tempo_falha:.2f}s — {type(e).__name__}: {e}"
-                self.stats[provider['name']]['errors'] += 1
-                st.sidebar.warning(f"⚠️ {last_error}. Tentando próximo provedor...")
-                continue
-
-        # Se nenhum provedor funcionou:
+            for tentativa in range(max_retries + 1):
+                try:
+                    if provider['type'] == 'gemini':
+                        dados, tempo = self._call_gemini(provider, prompt_instrucao, page_stream)
+                    elif provider['type'] == 'openai':
+                        dados, tempo = self._call_openai(provider, prompt_instrucao, page_stream)
+                    elif provider['type'] == 'deepseek':
+                        dados, tempo = self._call_deepseek(provider, prompt_instrucao, page_stream)
+                    elif provider['type'] == 'claude':
+                        dados, tempo = self._call_claude(provider, prompt_instrucao, page_stream)
+                    
+                    # Atualizar estatísticas
+                    self.stats[provider['name']]['success'] += 1
+                    self.stats[provider['name']]['total_time'] += tempo
+                    self.active_provider = provider['name']
+                    
+                    # Salvar no cache
+                    document_cache.set(cache_key, {
+                        'dados': dados,
+                        'tempo': tempo,
+                        'provider': provider['name']
+                    })
+                    
+                    return dados, True, tempo, provider['name']
+                        
+                except Exception as e:
+                    last_error = f"{provider['name']}: {str(e)}"
+                    self.stats[provider['name']]['errors'] += 1
+                    
+                    if tentativa < max_retries:
+                        delay = min(3 * (tentativa + 1), 15)
+                        st.sidebar.warning(f"⚠️ {provider['name']} falhou (tentativa {tentativa + 1}), aguardando {delay}s...")
+                        time.sleep(delay)
+                    continue
+        
         return {"error": f"Todos os provedores falharam. Último erro: {last_error}"}, False, 0, "Nenhum"
-
-
-    # --------------------------
-    # Chamadas individuais (CORRIGIDAS)
-    # --------------------------
+    
     def _call_gemini(self, provider, prompt, page_stream):
-        # Gemini é o único que aceita os bytes do PDF diretamente
         start = time.time()
         resp = provider['model'].generate_content(
             [prompt, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
@@ -308,49 +279,51 @@ class MultiAIProvider:
         )
         tempo = round(time.time() - start, 2)
         texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
-        dados = json.loads(texto) # Pode levantar json.JSONDecodeError
+        dados = json.loads(texto)
         return dados, tempo
-
+    
     def _call_openai(self, provider, prompt, page_stream):
         start = time.time()
-        # Converte a página PDF em imagem
-        base64_image, mime_type = self._pdf_page_to_base64_image(page_stream)
-
+        
+        # Codificar PDF em base64 para OpenAI
+        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
+        
         response = provider['client'].chat.completions.create(
             model=provider['model'],
             messages=[
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt}, # O prompt com a instrução JSON
+                        {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:{mime_type};base64,{base64_image}"
+                                "url": f"data:application/pdf;base64,{pdf_base64}"
                             }
                         }
                     ]
                 }
             ],
-            response_format={"type": "json_object"}, # Força a saída JSON
+            response_format={"type": "json_object"},
             timeout=60
         )
         
         tempo = round(time.time() - start, 2)
-        texto = response.choices[0].message.content.strip().lstrip("```json").rstrip("```").strip()
-        dados = json.loads(texto) # Pode levantar json.JSONDecodeError
+        texto = response.choices[0].message.content
+        dados = json.loads(texto)
         return dados, tempo
-
+    
     def _call_deepseek(self, provider, prompt, page_stream):
         start = time.time()
-        # Converte a página PDF em imagem
-        base64_image, mime_type = self._pdf_page_to_base64_image(page_stream)
-
+        
+        # Deepseek API (similar à OpenAI)
         client = OpenAI(
             api_key=provider['api_key'],
             base_url="https://api.deepseek.com/v1"
         )
-
+        
+        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
+        
         response = client.chat.completions.create(
             model=provider['model'],
             messages=[
@@ -361,93 +334,75 @@ class MultiAIProvider:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:{mime_type};base64,{base64_image}"
+                                "url": f"data:application/pdf;base64,{pdf_base64}"
                             }
                         }
                     ]
                 }
             ],
-            response_format={"type": "json_object"}, # Força a saída JSON
+            response_format={"type": "json_object"},
             timeout=60
         )
-
+        
         tempo = round(time.time() - start, 2)
-        texto = response.choices[0].message.content.strip().lstrip("```json").rstrip("```").strip()
-        dados = json.loads(texto) # Pode levantar json.JSONDecodeError
+        texto = response.choices[0].message.content
+        dados = json.loads(texto)
         return dados, tempo
-
+    
     def _call_claude(self, provider, prompt, page_stream):
         start = time.time()
-        # Converte a página PDF em imagem
-        base64_image, mime_type = self._pdf_page_to_base64_image(page_stream)
-
+        
+        # Anthropic Claude API
+        pdf_base64 = base64.b64encode(page_stream.getvalue()).decode('utf-8')
+        
         headers = {
             "x-api-key": provider['api_key'],
             "anthropic-version": "2023-06-01",
             "content-type": "application/json"
         }
         
-        # Formato de API de visão do Claude
         data = {
             "model": provider['model'],
             "max_tokens": 1000,
-            "system": "Você é um extrator de dados. Analise a imagem e responda estritamente no formato JSON solicitado.",
             "messages": [
                 {
                     "role": "user",
                     "content": [
                         {
+                            "type": "text",
+                            "text": prompt
+                        },
+                        {
                             "type": "image",
                             "source": {
                                 "type": "base64",
-                                "media_type": mime_type,
-                                "data": base64_image
+                                "media_type": "application/pdf",
+                                "data": pdf_base64
                             }
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt
                         }
                     ]
                 }
             ]
         }
-
+        
         response = requests.post(
-            "httpshttps://api.anthropic.com/v1/messages",
+            "https://api.anthropic.com/v1/messages",
             headers=headers,
             json=data,
             timeout=60
         )
-
+        
         if response.status_code != 200:
-            raise Exception(f"Claude API error: {response.status_code} {response.text}")
-
+            raise Exception(f"Claude API error: {response.text}")
+        
         tempo = round(time.time() - start, 2)
         result = response.json()
-        
-        if not result.get('content') or result['content'][0]['type'] != 'text':
-             raise Exception(f"Claude API returned unexpected content format: {result}")
-             
-        texto = result['content'][0]['text'].strip()
-        
-        # O Claude às vezes envolve a resposta em ```json ... ```
-        if not texto.startswith("{"):
-            json_match = re.search(r'\{.*\}', texto, re.DOTALL)
-            if json_match:
-                texto = json_match.group(0)
-            else:
-                raise json.JSONDecodeError("Nenhum JSON encontrado na resposta do Claude", texto, 0)
-
-        dados = json.loads(texto) # Pode levantar json.JSONDecodeError
+        texto = result['content'][0]['text']
+        dados = json.loads(texto)
         return dados, tempo
-
-    # --------------------------
-    # Estatísticas
-    # --------------------------
+    
     def get_stats(self):
         return self.stats
-
 
 # Inicializar o multi-IA
 multi_ai = MultiAIProvider()
@@ -520,8 +475,7 @@ def limpar_numero(numero: str) -> str:
 def validar_e_corrigir_dados(dados):
     """Valida e corrige dados extraídos da IA"""
     if not isinstance(dados, dict):
-        # Retorna um dict de erro padrão para garantir o fallback ou log adequado
-        return {"emitente": "ERRO_FORMATO", "numero_nota": "000000", "cidade": "ERRO"}
+        dados = {}
     
     required_fields = ['emitente', 'numero_nota', 'cidade']
     
@@ -554,7 +508,7 @@ def validar_e_corrigir_dados(dados):
     return dados
 
 # =====================================================================
-# SIDEBAR CONFIGURAÇÕES (CORRIGIDO)
+# SIDEBAR CONFIGURAÇÕES
 # =====================================================================
 with st.sidebar:
     st.markdown("### 🔧 Configurações Avançadas")
@@ -562,16 +516,12 @@ with st.sidebar:
     # Configuração de provedores
     st.markdown("#### Provedores de IA")
     for provider in multi_ai.providers:
-        # Inicializa o estado da sessão se não existir
-        key = f"provider_{provider['name']}"
-        if key not in st.session_state:
-            st.session_state[key] = provider.get('enabled', True)
-        
-        # O checkbox agora lê e escreve diretamente no st.session_state[key]
-        st.checkbox(
-            f"{provider['name']}",
-            key=key
+        enabled = st.checkbox(
+            f"{provider['name']}", 
+            value=provider.get('enabled', True),
+            key=f"provider_{provider['name']}"
         )
+        provider['enabled'] = enabled
     
     # Configuração de cache
     st.markdown("#### Otimizações")
@@ -699,13 +649,7 @@ if uploaded_files and process_btn:
             st.warning(f"Arquivo inválido: {a['name']}")
 
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
-    
-    # Ajuste para ler provedores do st.session_state
-    active_providers = [
-        p['name'] for p in multi_ai.providers 
-        if st.session_state.get(f"provider_{p['name']}", p.get('enabled', True))
-    ]
-    st.info(f"🔧 Provedores ativos: {active_providers}")
+    st.info(f"🔧 Provedores ativos: {[p['name'] for p in multi_ai.providers if p.get('enabled', True)]}")
 
     agrupados_bytes = {}
     resultados_meta = []
@@ -739,16 +683,11 @@ if uploaded_files and process_btn:
             dados, ok, tempo, provider = multi_ai.process_pdf_page(prompt, b)
             
             page_label = f"{name} (pág {idx+1})"
-            
-            # Validar e corrigir dados (inclui o tratamento de JSON inválido)
-            dados = validar_e_corrigir_dados(dados)
-            
-            if not ok or "error" in dados or dados["emitente"] == "ERRO_FORMATO": # Checa erro de formato
-                error_msg = dados.get("error", "Erro IA/JSON Inválido") if dados["emitente"] == "ERRO_FORMATO" else dados.get("error", str(dados))
-                processed_logs.append((page_label, tempo, "ERRO_IA", error_msg, provider))
+            if not ok or "error" in dados:
+                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados)), provider))
                 progresso += 1
                 progress_bar.progress(min(progresso/total_paginas, 1.0))
-                progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA/JSON [{provider}]</span>", unsafe_allow_html=True)
+                progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA [{provider}]</span>", unsafe_allow_html=True)
                 resultados_meta.append({
                     "arquivo_origem": name,
                     "pagina": idx+1,
@@ -758,6 +697,9 @@ if uploaded_files and process_btn:
                     "provider": provider
                 })
                 continue
+
+            # Validar e corrigir dados
+            dados = validar_e_corrigir_dados(dados)
 
             emitente_raw = dados.get("emitente", "") or ""
             numero_raw = dados.get("numero_nota", "") or ""
@@ -984,89 +926,3 @@ if "resultados" in st.session_state:
 
 else:
     st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
-
-# ==============================
-# 🔧 GERENCIAR PDF SELECIONADO (CORRIGIDO)
-# ==============================
-if "_manage_target" in st.session_state and "session_folder" in st.session_state:
-    target_file = st.session_state["_manage_target"]
-    # CORREÇÃO: Usar a pasta de sessão
-    output_dir = st.session_state["session_folder"] 
-    target_path = Path(output_dir) / target_file
-
-    st.markdown("---")
-    st.subheader(f"⚙️ Gerenciando: `{target_file}`")
-
-    # Mostrar o PDF
-    pdf_bytes = None
-    try:
-        if target_path.exists():
-            with open(target_path, "rb") as f:
-                pdf_bytes = f.read()
-            st.download_button("⬇️ Baixar PDF", pdf_bytes, file_name=target_file)
-            
-            # st.pdf_viewer é obsoleto ou não padrão.
-            # Vamos mostrar uma pré-visualização com base64 se for simples
-            b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-            pdf_display = f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
-            st.markdown(pdf_display, unsafe_allow_html=True)
-
-        else:
-            st.error(f"Arquivo não encontrado em: {target_path}")
-            if st.button("⬅️ Voltar"):
-                del st.session_state["_manage_target"]
-                st.rerun()
-            st.stop()
-    except Exception as e:
-        st.error(f"Erro ao carregar o PDF: {e}")
-        if st.button("⬅️ Voltar"):
-            del st.session_state["_manage_target"]
-            st.rerun()
-        st.stop()
-
-
-    # Botão para remover o modo "gerenciar"
-    if st.button("⬅️ Voltar à lista de arquivos"):
-        del st.session_state["_manage_target"]
-        st.rerun()
-
-    st.markdown("### 🧩 Separar páginas")
-    
-    if pdf_bytes:
-        pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
-        num_pages = len(pdf_reader.pages)
-
-        st.info(f"O PDF tem **{num_pages} páginas**.")
-        start_page = st.number_input("Página inicial", min_value=1, max_value=num_pages, value=1, key="start_page_split")
-        end_page = st.number_input("Página final", min_value=1, max_value=num_pages, value=num_pages, key="end_page_split")
-
-        if st.button("✂️ Separar e salvar nova nota"):
-            if start_page <= end_page:
-                writer = PdfWriter()
-                # O PyPDF2 usa índice 0-based
-                for i in range(start_page - 1, end_page):
-                    writer.add_page(pdf_reader.pages[i])
-                
-                # Use o nome atualizado, se existir
-                new_stem = st.session_state.get("novos_nomes", {}).get(target_file, target_file)
-                new_name = f"{Path(new_stem).stem}_paginas_{start_page}-{end_page}.pdf"
-                new_path = Path(output_dir) / new_name
-                
-                with open(new_path, "wb") as nf:
-                    writer.write(nf)
-                
-                # Adiciona o novo arquivo à sessão para que apareça na lista
-                new_file_meta = {
-                    "file": new_name,
-                    "numero": "EDITAR",
-                    "emitente": "EDITAR",
-                    "pages": (end_page - start_page) + 1
-                }
-                st.session_state["resultados"].append(new_file_meta)
-                st.session_state["novos_nomes"][new_name] = new_name
-                st.session_state["files_meta"][new_name] = new_file_meta
-                
-                st.success(f"✅ Novo PDF salvo: `{new_name}`. Ele foi adicionado à lista, ajuste o nome se necessário.")
-                st.rerun() # Recarrega para mostrar o novo arquivo na lista
-            else:
-                st.error("Página inicial não pode ser maior que a final.")
