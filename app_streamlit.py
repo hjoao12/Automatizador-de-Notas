@@ -27,6 +27,7 @@ MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
 MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
+REQUEST_DELAY = int(os.getenv("REQUEST_DELAY", "2"))
 MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.0-flash")
 
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -36,6 +37,14 @@ if not GEMINI_API_KEY:
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(MODEL_NAME)
+
+st.title("🧠 Automatizador de Notas Fiscais PDF")
+st.markdown("<div class='muted'>Conectando ao modelo...</div>", unsafe_allow_html=True)
+try:
+    _ = model.name
+    st.success("✅ Google Gemini configurado.")
+except Exception:
+    st.warning("⚠️ Problema ao conectar com Gemini — verifique a variável de ambiente GOOGLE_API_KEY.")
 
 # =====================================================================
 # CSS CORPORATIVO
@@ -57,14 +66,6 @@ div.stButton > button:hover { background-color: #0b3a5a; }
 .card { background:#fff;padding:12px;border-radius:8px;box-shadow:0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
 </style>
 """, unsafe_allow_html=True)
-
-st.title("🧠 Automatizador de Notas Fiscais PDF")
-st.markdown("<div class='muted'>Conectando ao modelo...</div>", unsafe_allow_html=True)
-try:
-    _ = model.name
-    st.success("✅ Google Gemini configurado.")
-except Exception:
-    st.warning("⚠️ Problema ao conectar com Gemini — verifique a variável de ambiente GOOGLE_API_KEY.")
 
 # =====================================================================
 # NORMALIZAÇÃO E SUBSTITUIÇÕES
@@ -114,15 +115,23 @@ def limpar_numero(numero: str) -> str:
     return numero.lstrip("0") or "0"
 
 # =====================================================================
-# FUNÇÕES GEMINI (com retry)
+# FUNÇÕES GEMINI + FALLBACK
 # =====================================================================
 def calcular_delay(tentativa, error_msg):
     if "retry in" in error_msg.lower():
         try:
             return min(float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2, MAX_RETRY_DELAY)
-        except:
-            pass
+        except: pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
+
+# Simulação de fallback (substitua pelas chamadas reais das APIs)
+def chamar_deepseek(page_stream, prompt):
+    time.sleep(1)
+    return {"emitente":"DEEPSEEK_FAKE","numero_nota":"123","cidade":"CIDADE_DS"}, 1.0
+
+def chamar_chatgpt(page_stream, prompt):
+    time.sleep(1)
+    return {"emitente":"CHATGPT_FAKE","numero_nota":"456","cidade":"CIDADE_CG"}, 1.0
 
 def chamar_gemini_retry(model, prompt_instrucao, page_stream):
     for tentativa in range(MAX_RETRIES + 1):
@@ -130,24 +139,50 @@ def chamar_gemini_retry(model, prompt_instrucao, page_stream):
             start = time.time()
             resp = model.generate_content(
                 [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
-                generation_config={"response_mime_type": "application/json"},
-                request_options={'timeout': 60}
+                generation_config={"response_mime_type": "application/json", "temperature":0.1},
+                request_options={'timeout':120}
             )
             tempo = round(time.time() - start, 2)
             texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
             try:
                 dados = json.loads(texto)
+                if not isinstance(dados, dict): raise ValueError("Resposta não é JSON válido")
+                return dados, True, tempo
             except Exception:
-                dados = {"error":"Resposta da IA não era JSON", "_raw":texto}
-            return dados, True, tempo
+                if tentativa < MAX_RETRIES:
+                    st.warning(f"⚠️ Resposta da IA não era JSON (tentativa {tentativa+1}). Retentando...")
+                    time.sleep(MIN_RETRY_DELAY)
+                    continue
+                else:
+                    break
         except ResourceExhausted as e:
             delay = calcular_delay(tentativa, str(e))
-            st.warning(f"⚠️ Quota excedida (tentativa {tentativa+1}/{MAX_RETRIES}). Aguardando {delay}s...")
+            st.warning(f"⚠️ Quota excedida Gemini (tentativa {tentativa+1}/{MAX_RETRIES}). Aguardando {int(delay)}s...")
             time.sleep(delay)
         except Exception as e:
-            if tentativa < MAX_RETRIES: time.sleep(MIN_RETRY_DELAY)
-            else: return {"error": str(e)}, False, 0
-    return {"error": "Falha máxima de tentativas"}, False, 0
+            if tentativa < MAX_RETRIES:
+                time.sleep(MIN_RETRY_DELAY)
+            else:
+                break
+
+    # fallback Deepseek
+    try:
+        st.info("🔄 Tentando fallback Deepseek...")
+        dados_ds, tempo_ds = chamar_deepseek(page_stream, prompt_instrucao)
+        if dados_ds: return dados_ds, True, tempo_ds
+    except Exception as e:
+        st.warning(f"⚠️ Deepseek falhou: {str(e)[:100]}")
+
+    # fallback ChatGPT
+    try:
+        st.info("🔄 Tentando fallback ChatGPT...")
+        dados_cg, tempo_cg = chamar_chatgpt(page_stream, prompt_instrucao)
+        if dados_cg: return dados_cg, True, tempo_cg
+    except Exception as e:
+        st.warning(f"⚠️ ChatGPT falhou: {str(e)[:100]}")
+
+    st.error("❌ Todos os modelos falharam. Retornando vazio.")
+    return {"emitente": "", "numero_nota": "", "cidade": ""}, False, 0
 
 # =====================================================================
 # FUNÇÕES DE ARQUIVOS
@@ -157,29 +192,24 @@ def salvar_pdf(path: Path, pages_bytes: list):
     for pb in pages_bytes:
         try:
             r = PdfReader(io.BytesIO(pb))
-            for p in r.pages:
-                writer.add_page(p)
-        except Exception:
-            continue
-    with open(path, "wb") as f_out:
-        writer.write(f_out)
+            for p in r.pages: writer.add_page(p)
+        except Exception: continue
+    with open(path, "wb") as f_out: writer.write(f_out)
 
 def criar_zip(files, folder: Path, nomes_map: dict):
     mem = io.BytesIO()
     with zipfile.ZipFile(mem, "w") as zf:
         for f in files:
             src = folder / f
-            if src.exists():
-                zf.write(src, arcname=nomes_map.get(f,f))
+            if src.exists(): zf.write(src, arcname=nomes_map.get(f,f))
     mem.seek(0)
     return mem
 
 # =====================================================================
-# UPLOAD, PROCESSAMENTO E GERENCIAMENTO
+# PROCESSAMENTO DE PDF
 # =====================================================================
 def processar_pdfs(uploaded_files):
     if not uploaded_files: return
-
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
@@ -212,11 +242,8 @@ def processar_pdfs(uploaded_files):
             processed_logs.append((name, 0, "ERRO_LEITURA"))
             continue
         for idx, page in enumerate(reader.pages):
-            b = io.BytesIO()
-            w = PdfWriter()
-            w.add_page(page)
-            w.write(b)
-            b.seek(0)
+            if progresso > 0: time.sleep(REQUEST_DELAY)
+            b = io.BytesIO(); w = PdfWriter(); w.add_page(page); w.write(b); b.seek(0)
 
             dados, ok, tempo = chamar_gemini_retry(model, prompt, b)
             page_label = f"{name} (pág {idx+1})"
@@ -240,7 +267,7 @@ def processar_pdfs(uploaded_files):
             progress_bar.progress(min(progresso/total_paginas,1.0))
             progresso_text.markdown(f"<span class='log-ok'>✅ {page_label} — OK ({tempo:.2f}s)</span>", unsafe_allow_html=True)
 
-    resultados, files_meta = [], {}
+    resultados, files_meta, nomes_map = [], {}, {}
     for (numero, emitente), pages_bytes in agrupados_bytes.items():
         if not numero or numero=="0": continue
         nome_pdf = f"DOC {numero}_{emitente}.pdf"
@@ -248,12 +275,24 @@ def processar_pdfs(uploaded_files):
         salvar_pdf(caminho, pages_bytes)
         resultados.append({"file":nome_pdf,"numero":numero,"emitente":emitente,"pages":len(pages_bytes)})
         files_meta[nome_pdf] = {"numero":numero,"emitente":emitente,"pages":len(pages_bytes)}
+        nomes_map[nome_pdf] = nome_pdf
 
+    # Salvar na sessão
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
-    st.session_state["novos_nomes"] = {r["file"]:r["file"] for r in resultados}
+    st.session_state["novos_nomes"] = nomes_map
     st.session_state["processed_logs"] = processed_logs
     st.session_state["files_meta"] = files_meta
+
+    # Mostra tabela de logs
+    st.subheader("📋 Resumo de processamento")
+    if processed_logs:
+        st.table([{"Página":l[0],"Tempo(s)":l[1],"Status":l[2],"Detalhes":l[3]} for l in processed_logs])
+
+    # Botão download ZIP
+    if resultados:
+        zip_mem = criar_zip([r["file"] for r in resultados], session_folder, nomes_map)
+        st.download_button("📥 Baixar todos PDFs (ZIP)", data=zip_mem, file_name=f"Notas_{uuid.uuid4().hex}.zip", mime="application/zip")
 
     st.success(f"✅ Processamento concluído em {round(time.time()-start_all,2)}s — {len(resultados)} arquivos gerados.")
     st.rerun()
