@@ -1,3 +1,6 @@
+# =====================================================================
+# CONFIGURAÇÃO INICIAL
+# =====================================================================
 import os
 import io
 import time
@@ -14,9 +17,6 @@ from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
 from dotenv import load_dotenv
 
-# =====================================================================
-# CONFIGURAÇÃO INICIAL
-# =====================================================================
 load_dotenv()
 st.set_page_config(page_title="Automatizador de Notas Fiscais", page_icon="🧾", layout="wide")
 
@@ -28,7 +28,7 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
 MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 REQUEST_DELAY = int(os.getenv("REQUEST_DELAY", "2"))
-MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
+MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.5")  # ✅ Modelo corrigido
 
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GEMINI_API_KEY:
@@ -124,7 +124,6 @@ def calcular_delay(tentativa, error_msg):
         except: pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
-# Simulação de fallback (substitua pelas chamadas reais das APIs)
 def chamar_deepseek(page_stream, prompt):
     time.sleep(1)
     return {"emitente":"DEEPSEEK_FAKE","numero_nota":"123","cidade":"CIDADE_DS"}, 1.0
@@ -277,44 +276,19 @@ def processar_pdfs(uploaded_files):
         files_meta[nome_pdf] = {"numero":numero,"emitente":emitente,"pages":len(pages_bytes)}
         nomes_map[nome_pdf] = nome_pdf
 
-    # Salvar na sessão
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
     st.session_state["novos_nomes"] = nomes_map
     st.session_state["processed_logs"] = processed_logs
     st.session_state["files_meta"] = files_meta
 
-    # Mostra tabela de logs
     st.subheader("📋 Resumo de processamento")
     if processed_logs:
         st.table([{"Página":l[0],"Tempo(s)":l[1],"Status":l[2],"Detalhes":l[3]} for l in processed_logs])
 
-    # Botão download ZIP
     if resultados:
         zip_mem = criar_zip([r["file"] for r in resultados], session_folder, nomes_map)
         st.download_button("📥 Baixar todos PDFs (ZIP)", data=zip_mem, file_name=f"Notas_{uuid.uuid4().hex}.zip", mime="application/zip")
 
     st.success(f"✅ Processamento concluído em {round(time.time()-start_all,2)}s — {len(resultados)} arquivos gerados.")
-    st.rerun()
-
-# =====================================================================
-# UPLOAD E BOTÕES DE AÇÃO
-# =====================================================================
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown("### 📎 Enviar PDFs e processar (uma vez)")
-uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True, key="uploader")
-col_up_a, col_up_b = st.columns([1,1])
-with col_up_a: process_btn = st.button("🚀 Processar PDFs")
-with col_up_b: clear_session = st.button("♻️ Limpar sessão (apagar temporários)")
-st.markdown("</div>", unsafe_allow_html=True)
-
-if clear_session:
-    if "session_folder" in st.session_state:
-        shutil.rmtree(st.session_state["session_folder"], ignore_errors=True)
-    for k in ["resultados","session_folder","novos_nomes","processed_logs","files_meta","selected_files"]:
-        st.session_state.pop(k, None)
-    st.success("Sessão limpa.")
-    st.experimental_rerun()
-
-if uploaded_files and process_btn:
-    processar_pdfs(uploaded_files)
+    # ❌ removido st.rerun() para não reiniciar upload
