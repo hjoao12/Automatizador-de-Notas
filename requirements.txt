@@ -4,5 +4,5 @@ python-dotenv
 google-generativeai
 openai
 requests
-PyMuPDF
+pymupdf
 streamlit-sortables
