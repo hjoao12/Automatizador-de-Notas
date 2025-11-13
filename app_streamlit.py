@@ -143,7 +143,6 @@ if not GEMINI_API_KEY:
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    # MANTIDO EXATAMENTE COMO VOCÊ ENVIOU
     model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
     st.sidebar.success("✅ Gemini configurado")
 except Exception as e:
@@ -186,14 +185,8 @@ SUBSTITUICOES_FIXAS = {
     "EXPRESS TCM": "EXPRESS_TCM",
     "EXPRESS TCM LTDA": "EXPRESS_TCM",
     "MDM RENOVADORA DE PNEUS LTDA ME": "MDM_RENOVADORA", 
-    "MDM RENOVADora DE PNEUS": "MDM_RENOVADORA",
+    "MDM RENOVADORA DE PNEUS": "MDM_RENOVADORA",
 }
-
-# *** NOVO: INICIALIZA AS REGRAS NA SESSÃO ***
-# Copia as regras fixas para a sessão na primeira vez que o app é carregado
-if "regras_substituicao" not in st.session_state:
-    st.session_state.regras_substituicao = SUBSTITUICOES_FIXAS.copy()
-
 
 def _normalizar_texto(s: str) -> str:
     if not s:
@@ -202,17 +195,12 @@ def _normalizar_texto(s: str) -> str:
     s = re.sub(r"[^A-Z0-9 ]+", " ", s.upper())
     return re.sub(r"\s+", " ", s).strip()
 
-# *** ALTERAÇÃO: FUNÇÃO MODIFICADA PARA USAR O SESSION_STATE ***
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
     if "SABARA" in nome_norm:
         return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
-    
-    # Pega as regras da sessão do Streamlit, e não mais da constante
-    regras_atuais = st.session_state.get("regras_substituicao", SUBSTITUICOES_FIXAS)
-    
-    for padrao, substituto in regras_atuais.items():
+    for padrao, substituto in SUBSTITUICOES_FIXAS.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
     return re.sub(r"\s+", "_", nome_norm)
@@ -320,56 +308,6 @@ with st.sidebar:
         st.success("Cache limpo!")
         st.rerun()
 
-    # *** NOVO: PAINEL DE GERENCIAMENTO DE REGRAS ***
-    st.markdown("---")
-    with st.expander("⚙️ Gerenciar Regras de Nomes"):
-        st.markdown("##### Regras Atuais")
-        
-        # Pega as regras da sessão para exibir
-        regras_atuais = st.session_state.get("regras_substituicao", {})
-        if not regras_atuais:
-            st.info("Nenhuma regra personalizada.")
-
-        # Lista para exclusão (para evitar erros de modificação durante iteração)
-        regras_para_remover = []
-        
-        # Exibe regras atuais e botão de excluir
-        for padrao, substituto in regras_atuais.items():
-            col1, col2 = st.columns([0.8, 0.2])
-            with col1:
-                # Usar st.text para evitar formatação de markdown
-                st.text(f"'{padrao}' -> '{substituto}'")
-            with col2:
-                # Botão de exclusão pequeno
-                if st.button("🗑️", key=f"del_regra_{padrao}", help=f"Remover regra para '{padrao}'"):
-                    regras_para_remover.append(padrao)
-        
-        # Processa as exclusões
-        if regras_para_remover:
-            for padrao in regras_para_remover:
-                st.session_state.regras_substituicao.pop(padrao, None)
-            st.rerun() # Recarrega para a lista atualizar
-
-        st.markdown("---")
-        st.markdown("##### Adicionar / Editar Regra")
-        
-        # Campos de input para nova regra
-        novo_padrao = st.text_input("Texto a encontrar (Ex: COMPANHIA XPTO)", key="novo_padrao_input")
-        novo_substituto = st.text_input("Substituir por (Ex: XPTO)", key="novo_substituto_input")
-        
-        if st.button("➕ Salvar Regra"):
-            if novo_padrao and novo_substituto:
-                # Adiciona ou edita a regra no dicionário da sessão
-                st.session_state.regras_substituicao[novo_padrao] = novo_substituto
-                st.success(f"Regra salva: '{novo_padrao}' -> '{novo_substituto}'")
-                
-                # Limpa os campos de input (requer chaves únicas)
-                st.session_state.novo_padrao_input = ""
-                st.session_state.novo_substituto_input = ""
-                st.rerun() # Recarrega para atualizar a lista e limpar campos
-            else:
-                st.warning("Ambos os campos são obrigatórios.")
-
 # =====================================================================
 # DASHBOARD ANALÍTICO
 # =====================================================================
@@ -434,11 +372,10 @@ if clear_session:
             shutil.rmtree(st.session_state["session_folder"])
         except Exception:
             pass
-    # Limpa tudo, exceto as regras de substituição
     for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
         if k in st.session_state:
             del st.session_state[k]
-    st.success("Sessão limpa (regras de nome mantidas).")
+    st.success("Sessão limpa.")
     st.rerun()
 
 if uploaded_files and process_btn:
@@ -536,7 +473,6 @@ if uploaded_files and process_btn:
             cidade_raw = dados.get("cidade", "") or ""
 
             numero = limpar_numero(numero_raw)
-            # A função abaixo agora usa as regras da sessão
             nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
             emitente = limpar_emitente(nome_map)
 
@@ -690,7 +626,7 @@ if "resultados" in st.session_state:
 
         emit = meta.get("emitente", r.get("emitente", "-"))
         num = meta.get("numero", r.get("numero", "-"))
-        cols[2].markdown(f"<div class='small-note'>{emit}  •   Nº {num}  •   {r.get('pages',1)} pág(s)</div>", unsafe_allow_html=True)
+        cols[2].markdown(f"<div class='small-note'>{emit}  •  Nº {num}  •  {r.get('pages',1)} pág(s)</div>", unsafe_allow_html=True)
 
         action_col = cols[3]
         action = action_col.selectbox("", options=["...", "Remover (mover p/ lixeira)", "Baixar este arquivo"], key=f"action_{fname}", index=0)
