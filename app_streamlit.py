@@ -200,7 +200,7 @@ def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
     if "SABARA" in nome_norm:
         return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
-    for padrao, substituto in SUBSTITUICOES_FIXAS.items():
+    for padrao, substituto in SUBSTITUICOES_COMBINADAS.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
     return re.sub(r"\s+", "_", nome_norm)
