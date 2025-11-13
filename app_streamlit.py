@@ -200,7 +200,7 @@ def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
     if "SABARA" in nome_norm:
         return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
-    for padrao, substituto in SUBSTITUICOES_COMBINADAS.items():
+    for padrao, substituto in SUBSTITUICOES_FIXAS.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
     return re.sub(r"\s+", "_", nome_norm)
@@ -252,65 +252,6 @@ def validar_e_corrigir_dados(dados):
         dados['numero_nota'] = numero_limpo if numero_limpo else "000000"
     
     return dados
-
-# =====================================================================
-# GESTOR DE SUBSTITUIÇÕES PERSONALIZADAS (INTERFACE ⚙️)
-# =====================================================================
-CUSTOM_FILE = Path("substituicoes_custom.json")
-
-# Carrega substituições personalizadas do disco
-if CUSTOM_FILE.exists():
-    try:
-        with open(CUSTOM_FILE, "r", encoding="utf-8") as f:
-            st.session_state["SUBSTITUICOES_CUSTOM"] = json.load(f)
-    except Exception:
-        st.session_state["SUBSTITUICOES_CUSTOM"] = {}
-else:
-    st.session_state["SUBSTITUICOES_CUSTOM"] = {}
-
-# Combina as fixas com as personalizadas
-SUBSTITUICOES_COMBINADAS = SUBSTITUICOES_FIXAS.copy()
-SUBSTITUICOES_COMBINADAS.update(st.session_state["SUBSTITUICOES_CUSTOM"])
-
-# Botão de engrenagem na interface
-with st.expander("⚙️ Gerenciar substituições (avançado)"):
-    st.markdown("Adicione ou altere substituições personalizadas que complementam as fixas. As fixas originais **não serão modificadas**.")
-    
-    # Campo para adicionar nova substituição
-    with st.form("nova_substituicao"):
-        col1, col2 = st.columns(2)
-        with col1:
-            padrao = st.text_input("Texto original (emitente detectado):", key="novo_padrao")
-        with col2:
-            substituto = st.text_input("Substituir por:", key="novo_substituto")
-        add_btn = st.form_submit_button("➕ Adicionar / Atualizar")
-
-        if add_btn:
-            if padrao and substituto:
-                st.session_state["SUBSTITUICOES_CUSTOM"][padrao.upper()] = substituto.upper()
-                with open(CUSTOM_FILE, "w", encoding="utf-8") as f:
-                    json.dump(st.session_state["SUBSTITUICOES_CUSTOM"], f, ensure_ascii=False, indent=2)
-                st.success(f"Substituição salva: {padrao.upper()} → {substituto.upper()}")
-                st.rerun()
-            else:
-                st.warning("Preencha ambos os campos antes de adicionar.")
-
-    # Lista atual de substituições personalizadas
-    if st.session_state["SUBSTITUICOES_CUSTOM"]:
-        st.markdown("#### 🔁 Substituições personalizadas salvas:")
-        for k, v in st.session_state["SUBSTITUICOES_CUSTOM"].items():
-            col1, col2, col3 = st.columns([3,3,1])
-            col1.write(f"`{k}`")
-            col2.write(f"→ `{v}`")
-            if col3.button("❌", key=f"del_{k}"):
-                st.session_state["SUBSTITUICOES_CUSTOM"].pop(k)
-                with open(CUSTOM_FILE, "w", encoding="utf-8") as f:
-                    json.dump(st.session_state["SUBSTITUICOES_CUSTOM"], f, ensure_ascii=False, indent=2)
-                st.success(f"Removido: {k}")
-                st.rerun()
-    else:
-        st.info("Nenhuma substituição personalizada adicionada ainda.")
-
 
 # =====================================================================
 # PROCESSAMENTO GEMINI (SIMPLIFICADO)
