@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 # CONFIGURAÇÃO INICIAL
 # =====================================================================
 load_dotenv()
-st.set_page_config(page_title="Automatizador de Notas Fiscais", page_icon="🧾", layout="wide")
+st.set_page_config(page_title="Automatizador de Notas Fiscais", page_icon="fa-solid fa-file-import"> </i>)
 
 # ======= CSS Corporativo Claro =======
 st.markdown("""
