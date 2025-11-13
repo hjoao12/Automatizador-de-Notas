@@ -603,7 +603,7 @@ if "resultados" in st.session_state:
         visible.sort(key=lambda x: int(x["numero"]) if x["numero"].isdigit() else 0, reverse=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown("### 🗂 Notas processadas")
+    st.markdown("### 📁 Notas processadas")
     
     # Inicializar selected_files se não existir
     if "selected_files" not in st.session_state:
