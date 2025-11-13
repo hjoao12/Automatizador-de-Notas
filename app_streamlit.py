@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 load_dotenv()
 st.set_page_config(
     page_title="Automatizador de Notas Fiscais", 
-    page_icon="fa-solid fa-file-import"
+    page_icon="icone.png"
 )
 
 # ======= CSS Corporativo Claro =======
