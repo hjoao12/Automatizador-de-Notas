@@ -86,7 +86,7 @@ div.stButton > button:hover {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 Automatizador de Notas Fiscais PDF")
+st.title("Automatizador de Notas Fiscais PDF")
 
 # =====================================================================
 # SISTEMA DE CACHE INTELIGENTE
@@ -534,7 +534,7 @@ if uploaded_files and process_btn:
 # =====================================================================
 if "resultados" in st.session_state:
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown("### 📋 Gerenciamento — selecione e aplique ações")
+    st.markdown("### Gerenciamento — selecione e aplique ações")
     resultados = st.session_state["resultados"]
     session_folder = Path(st.session_state["session_folder"])
     novos_nomes = st.session_state.get("novos_nomes", {r["file"]: r["file"] for r in resultados})
