@@ -198,6 +198,10 @@ SUBSTITUICOES_FIXAS = {
     "URP CARGAS E LOGISTICA LTDA": "URP",
     "U.R.P CARGAS & LOGISTICA LTDA": "URP",
     "U.R.P CARGAS E LOGISTICA LTDA": "URP",
+    "MF DE MELO FILHO-ME": "MF_DE_MELO",
+    "M.F DE MELO FILHO": "MF_DE_MELO",
+    "M.F DE MELO FILHO-ME": "MF_DE_MELO",
+    
 }
 
 def _normalizar_texto(s: str) -> str:
