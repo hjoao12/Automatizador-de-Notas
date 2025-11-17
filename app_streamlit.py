@@ -368,7 +368,7 @@ def criar_dashboard_analitico():
 # UPLOAD E PROCESSAMENTO
 # =====================================================================
 st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown("### 📎 Enviar PDFs e processar (uma vez)")
+st.markdown("### 📎 Enviar PDFs e processar ")
 uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True, key="uploader")
 col_up_a, col_up_b = st.columns([1,1])
 with col_up_a:
