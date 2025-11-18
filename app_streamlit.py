@@ -430,7 +430,7 @@ with st.sidebar:
         ok, msg = add_pattern(new_pat_raw.strip(), new_pat_sub.strip())
         if ok:
             st.success(msg)
-            st.experimental_rerun()
+            st.rerun()
         else:
             st.warning(msg)
     st.markdown("**Editar / Excluir**")
@@ -445,21 +445,21 @@ with st.sidebar:
                 ok, msg = edit_pattern(edit_sel, edit_raw.strip(), edit_sub.strip())
                 if ok:
                     st.success(msg)
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.warning(msg)
             if st.button("🗑️ Excluir padrão"):
                 ok, msg = remove_pattern(edit_sel)
                 if ok:
                     st.success(msg)
-                    st.experimental_rerun()
+                    st.rerun()
                 else:
                     st.warning(msg)
     st.markdown("---")
     if st.button("🔄 Limpar Cache"):
         document_cache.clear()
         st.success("Cache limpo!")
-        st.experimental_rerun()
+        st.rerun()
 
 # =====================================================================
 # DASHBOARD ANALÍTICO (mantive a sua lógica)
@@ -519,7 +519,7 @@ if clear_session:
         if k in st.session_state:
             del st.session_state[k]
     st.success("Sessão limpa.")
-    st.experimental_rerun()
+    st.rerun()
 
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
@@ -740,7 +740,7 @@ if uploaded_files and process_btn:
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
 
     criar_dashboard_analitico()
-    st.experimental_rerun()
+    st.rerun()
 
 # =====================================================================
 # PAINEL CORPORATIVO - GERENCIAMENTO (mantive sua lógica, pequenas correções)
@@ -795,7 +795,7 @@ if "resultados" in st.session_state:
                         st.session_state["files_meta"].pop(f, None)
                     count += 1
                 st.success(f"{count} arquivo(s) excluído(s).")
-                st.experimental_rerun()
+                st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -842,7 +842,7 @@ if "resultados" in st.session_state:
 
         if action_col.button("⚙️ Gerenciar", key=f"manage_{fname}"):
             st.session_state["_manage_target"] = fname
-            st.experimental_rerun()
+            st.rerun()
 
         if action == "Remover (mover p/ lixeira)":
             src = session_folder / fname
@@ -857,7 +857,7 @@ if "resultados" in st.session_state:
             if fname in st.session_state.get("files_meta", {}):
                 st.session_state["files_meta"].pop(fname, None)
             st.success(f"{fname} removido.")
-            st.experimental_rerun()
+            st.rerun()
         elif action == "Baixar este arquivo":
             src = session_folder / fname
             if src.exists():
@@ -874,7 +874,7 @@ if "resultados" in st.session_state:
         manage_target = st.session_state["_manage_target"]
         if not any(r["file"] == manage_target for r in st.session_state.get("resultados", [])):
             st.session_state.pop("_manage_target", None)
-            st.experimental_rerun()
+            st.rerun()
 
         st.markdown('<div class="manage-panel">', unsafe_allow_html=True)
         st.markdown(f"### ⚙️ Gerenciar: `{manage_target}`")
@@ -986,7 +986,7 @@ if "resultados" in st.session_state:
                                     st.success(f"📭 Arquivo `{manage_target}` foi excluído (ficou vazio)")
                                     st.session_state.pop("_manage_target", None)
                                 st.session_state[sel_key] = []  # Limpar seleção
-                                st.experimental_rerun()
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"❌ Erro ao remover páginas: {str(e)}")
 
@@ -994,12 +994,12 @@ if "resultados" in st.session_state:
                     if st.button("❌ Fechar", key=f"close_{manage_target}"):
                         st.session_state.pop("_manage_target", None)
                         st.session_state.pop(sel_key, None)
-                        st.experimental_rerun()
+                        st.rerun()
         else:
             st.warning("Não foi possível carregar as páginas do arquivo.")
             if st.button("❌ Fechar", key=f"close_err_{manage_target}"):
                 st.session_state.pop("_manage_target", None)
-                st.experimental_rerun()
+                st.rerun()
 
     criar_dashboard_analitico()
 
