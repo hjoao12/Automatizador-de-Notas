@@ -1014,7 +1014,7 @@ with col_l3:
             ok, msg = import_patterns_from_file(temp_import)
             if ok:
                 st.success(msg)
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error(msg)
         except Exception as e:
