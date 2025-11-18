@@ -957,8 +957,9 @@ if "session_folder" in st.session_state and "resultados" in st.session_state:
 # =====================================================================
 # BLOCO 6/6 — LOGS AVANÇADOS, EXPORT/IMPORT DE PADRÕES, LIMPEZA E FINALIZAÇÃO
 # =====================================================================
-
 # --- Funções utilitárias adicionais ---
+
+
 def export_patterns_to_file(dest: Path):
     try:
         save_patterns(PATTERNS)
