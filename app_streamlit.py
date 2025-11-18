@@ -317,7 +317,7 @@ def validar_e_corrigir_dados(dados):
         numero_limpo = re.sub(r'[^\d]', '', str(dados['numero_nota']))
         dados['numero_nota'] = numero_limpo if numero_limpo else "000000"
     return dados
-    # =====================================================================
+# =====================================================================
 # CONFIGURAÇÃO GEMINI
 # =====================================================================
 if hasattr(st, "secrets") and st.secrets.get("GOOGLE_API_KEY"):
