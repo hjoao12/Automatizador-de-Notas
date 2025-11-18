@@ -1,13 +1,7 @@
-# app_streamlit_turbo_v3.py
-"""
-TURBO v3 — Interface Corporativa Elegante
-- Processamento por página com ThreadPoolExecutor
-- Cache local por arquivo+prompt
-- Patterns persistentes (CRUD + import/export)
-- Separação de páginas mantida
-- UI mais leve e corporativa (azul elegante)
-- Compatível com Streamlit Cloud (usa st.secrets quando disponível)
-"""
+# turbo_v3_full.py
+# Versão: Turbo v3 — Arquivo completo otimizado (modo B)
+# Mantive sua lógica original; otimizei leitura de PDFs, pool e geração final.
+
 import os
 import io
 import time
@@ -20,630 +14,1073 @@ import re
 import hashlib
 import pickle
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Tuple, Dict, Any, List
-
-import streamlit as st
-from dotenv import load_dotenv
 from PyPDF2 import PdfReader, PdfWriter
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
+import streamlit as st
+from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ---------------------------
-# CONFIG
-# ---------------------------
+# =====================================================================
+# CONFIGURAÇÃO INICIAL
+# =====================================================================
 load_dotenv()
-st.set_page_config(page_title="Automatizador de Notas — TURBO v3", page_icon="📄", layout="wide")
+st.set_page_config(
+    page_title="Automatizador de Notas Fiscais",
+    page_icon="📄",
+    layout="wide"
+)
 
-BASE_DIR = Path(".")
-TEMP_FOLDER = BASE_DIR / "temp"
-CACHE_DIR = BASE_DIR / "cache"
-CONFIG_DIR = BASE_DIR / "config"
-PATTERNS_FILE = CONFIG_DIR / "patterns.json"
-
-for p in (TEMP_FOLDER, CACHE_DIR, CONFIG_DIR):
-    p.mkdir(exist_ok=True)
-
-# limits and defaults
-MAX_WORKERS_DEFAULT = max(2, min(4, (os.cpu_count() or 2)))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
-MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
-MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
-MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "500"))
-
-# ---------------------------
-# STYLES (Corporativa Elegante)
-# ---------------------------
+# ======= CSS Corporativo =======
 st.markdown(
     """
-    <style>
-    :root{--primary:#0f4c81; --muted:#6b7280; --card:#ffffff; --bg:#f6f8fa}
-    body { background: var(--bg); color: #222; font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif; }
-    [data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #e9edf5; }
-    .card { background: var(--card); padding: 12px; border-radius: 10px; box-shadow: 0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px;}
-    .primary-btn { background: var(--primary); color: #fff; border-radius: 8px; padding:6px 10px; }
-    .small-note { color: var(--muted); font-size:13px; }
-    .success-log { color:#155724; background:#dff0d8; padding:8px; border-radius:6px; }
-    .warning-log { color:#856404; background:#fff3cd; padding:8px; border-radius:6px; }
-    .muted { color: var(--muted); }
-    </style>
-    """,
+<style>
+body {
+  background-color: #f8f9fa;
+  color: #212529;
+  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+}
+[data-testid="stSidebar"] {
+  background-color: #ffffff;
+  border-right: 1px solid #e9ecef;
+}
+h1, h2, h3, h4 {
+  color: #0f4c81;
+}
+div.stButton > button {
+  background-color: #0f4c81;
+  color: white;
+  border-radius: 8px;
+  border: none;
+  font-weight: 500;
+}
+div.stButton > button:hover {
+  background-color: #0b3a5a;
+}
+.stProgress > div > div > div > div {
+  background-color: #28a745 !important;
+}
+.success-log {
+  color: #155724;
+  background-color: #d4edda;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.warning-log {
+  color: #856404;
+  background-color: #fff3cd;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.error-log {
+  color: #721c24;
+  background-color: #f8d7da;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.card { 
+  background: #fff; 
+  padding: 12px; 
+  border-radius:8px; 
+  box-shadow: 0 6px 18px rgba(15,76,129,0.04); 
+  margin-bottom:12px; 
+}
+.manage-panel { 
+  background: #f8f9fa; 
+  padding: 15px; 
+  border-radius: 8px; 
+  border-left: 4px solid #0f4c81; 
+  margin: 10px 0; 
+}
+.small-note {
+  font-size:13px;
+  color:#6b7280;
+}
+</style>
+""",
     unsafe_allow_html=True,
 )
 
-st.title("Automatizador de Notas Fiscais — TURBO v3")
-st.caption("Interface Corporativa Elegante — rápido, robusto e pronto para produção (Streamlit Cloud friendly)")
+st.title("Automatizador de Notas Fiscais PDF — Turbo Seguro (v3)")
 
-# ---------------------------
-# UTIL: cache simple (pickle files)
-# ---------------------------
+# =====================================================================
+# CONFIGURAÇÕES GERAIS E ESTRUTURAS
+# =====================================================================
+TEMP_FOLDER = Path("./temp")
+TEMP_FOLDER.mkdir(exist_ok=True)
+
+CACHE_DIR = Path("./cache")
+CACHE_DIR.mkdir(exist_ok=True)
+
+CONFIG_DIR = Path("./config")
+CONFIG_DIR.mkdir(exist_ok=True)
+
+PATTERNS_FILE = CONFIG_DIR / "patterns.json"
+
+# LIMITES E THREADS
+MAX_WORKERS_DEFAULT = max(2, min(4, (os.cpu_count() or 2)))
+MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "500"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
+MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
+
+# =====================================================================
+# SISTEMA DE CACHE INTELIGENTE
+# =====================================================================
 class DocumentCache:
-    def __init__(self, cache_dir: Path):
+    def __init__(self, cache_dir=CACHE_DIR):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
 
-    def _cache_path(self, key: str) -> Path:
-        safe = re.sub(r'[^a-zA-Z0-9_\-]', '_', key)[:180]
+    def _cache_path(self, key: str):
+        safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", key)[:240]
         return self.cache_dir / f"{safe}.pkl"
 
-    def key_for_file(self, file_bytes: bytes, prompt: str) -> str:
-        return hashlib.md5(file_bytes).hexdigest() + "_" + hashlib.md5(prompt.encode()).hexdigest()
+    def get_cache_key_file(self, file_bytes: bytes, prompt: str):
+        """Chave por arquivo inteiro + prompt"""
+        content_hash = hashlib.md5(file_bytes).hexdigest()
+        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+        return f"{content_hash}_{prompt_hash}"
 
-    def get(self, key: str):
-        p = self._cache_path(key)
-        if not p.exists():
-            return None
-        try:
-            with open(p, "rb") as f:
-                return pickle.load(f)
-        except Exception:
+    def get(self, key):
+        cache_file = self._cache_path(key)
+        if cache_file.exists():
             try:
-                p.unlink()
+                with open(cache_file, "rb") as f:
+                    return pickle.load(f)
+            except (EOFError, pickle.UnpicklingError):
+                try:
+                    cache_file.unlink()
+                except Exception:
+                    pass
+                return None
             except Exception:
-                pass
-            return None
+                return None
+        return None
 
-    def set(self, key: str, data):
-        p = self._cache_path(key)
+    def set(self, key, data):
+        cache_file = self._cache_path(key)
         try:
-            with open(p, "wb") as f:
+            with open(cache_file, "wb") as f:
                 pickle.dump(data, f)
         except Exception:
-            pass
+            return
 
     def clear(self):
-        for f in self.cache_dir.glob("*.pkl"):
+        for cache_file in self.cache_dir.glob("*.pkl"):
             try:
-                f.unlink()
+                cache_file.unlink()
             except Exception:
                 pass
 
-document_cache = DocumentCache(CACHE_DIR)
 
-# ---------------------------
-# PATTERNS (load/save CRUD)
-# ---------------------------
-def load_patterns() -> Dict[str, str]:
+document_cache = DocumentCache()
+
+# =====================================================================
+# PADRÕES DE RENOMEAÇÃO PERSISTENTES (LOAD / SAVE / CRUD)
+# =====================================================================
+def load_patterns():
     if not PATTERNS_FILE.exists():
-        default = {
-            "COMPANHIA DE AGUA E ESGOTOS": "CAGE",
+        default_patterns = {
+            "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
+            "COMPANHIA DE AGUA E ESGOTOS DA PARAÍBA": "CAGEPA",
+            "CIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
+            "TRANSPORTE LIDA": "TRANSPORTE_LIDA",
+            "UNIPAR CARBOCLORO": "UNIPAR_CARBOCLORO",
+            "EXPRESS TCM": "EXPRESS_TCM",
+            "MDM RENOVADORA DE PNEUS": "MDM_RENOVADORA",
+            "COMPANHIA DE AGUAS E ESGOTOS DO RN": "CAERN",
+            "EKIPE TEC DE SEG E INCENDIO": "EKIPE",
             "PETROLEO BRASILEIRO": "PETROBRAS",
-            "UNIPAR CARBOCLORO": "UNIPAR",
+            "INNOVATIVE WATER CARE": "SIGURA",
+            "COMERCIAL E IMPORTADORA DE PNEUS": "CAMPNEUS",
+            "URP CARGAS E LOGISTICA": "URP",
+            "M.F DE MELO FILHO": "MF_DE_MELO",
         }
-        save_patterns(default)
-        return default
+        save_patterns(default_patterns)
+        return default_patterns
     try:
         with open(PATTERNS_FILE, "r", encoding="utf-8") as f:
-            d = json.load(f)
-            return {str(k): str(v) for k, v in d.items()}
+            data = json.load(f)
+            return {str(k): str(v) for k, v in data.items()}
     except Exception:
         return {}
 
-def save_patterns(p: Dict[str, str]):
+
+def save_patterns(pats: dict):
     try:
         with open(PATTERNS_FILE, "w", encoding="utf-8") as f:
-            json.dump(p, f, ensure_ascii=False, indent=2)
+            json.dump(pats, f, ensure_ascii=False, indent=2)
     except Exception:
-        pass
+        return
+
 
 PATTERNS = load_patterns()
 
-def normalize_text(s: str) -> str:
+
+def normalize_pattern_key(s: str) -> str:
     if not s:
         return ""
     s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("ASCII")
-    s = re.sub(r'[^A-Z0-9 ]+', ' ', s.upper())
-    return re.sub(r'\s+', ' ', s).strip()
+    s = re.sub(r"[^A-Z0-9 ]+", " ", s.upper())
+    return re.sub(r"\s+", " ", s).strip()
 
-def substitute_emitente(raw_name: str, raw_city: str = None) -> str:
-    n = normalize_text(raw_name)
-    city = normalize_text(raw_city) if raw_city else ""
-    # specific rule example
-    if "SABARA" in n:
-        return f"SB_{(city.split()[0] if city else 'NA')}"
-    # use most specific pattern (longer first)
-    for pat in sorted(PATTERNS.keys(), key=lambda x: len(x), reverse=True):
-        if normalize_text(pat) in n:
-            return PATTERNS[pat]
-    return re.sub(r'\s+', '_', n) or "SEM_NOME"
 
-def clean_emitente(name: str) -> str:
-    if not name:
+def add_pattern(raw_pattern: str, substitute: str) -> tuple:
+    raw_pattern = raw_pattern.strip()
+    substitute = substitute.strip()
+    key_norm = normalize_pattern_key(raw_pattern)
+    if not key_norm:
+        return False, "Padrão vazio."
+    for existing in PATTERNS.keys():
+        if normalize_pattern_key(existing) == key_norm:
+            return False, "Conflito: padrão já existe (mesma normalização)."
+    PATTERNS[raw_pattern] = substitute
+    save_patterns(PATTERNS)
+    return True, "Padrão adicionado."
+
+
+def edit_pattern(old_raw: str, new_raw: str, new_sub: str) -> tuple:
+    old_raw = old_raw.strip()
+    new_raw = new_raw.strip()
+    new_sub = new_sub.strip()
+    if old_raw not in PATTERNS:
+        return False, "Padrão não encontrado."
+    key_norm = normalize_pattern_key(new_raw)
+    for k in PATTERNS.keys():
+        if k != old_raw and normalize_pattern_key(k) == key_norm:
+            return False, "Conflito: outro padrão com mesma normalização."
+    PATTERNS.pop(old_raw)
+    PATTERNS[new_raw] = new_sub
+    save_patterns(PATTERNS)
+    return True, "Padrão editado."
+
+
+def remove_pattern(raw_pattern: str) -> tuple:
+    raw_pattern = raw_pattern.strip()
+    if raw_pattern in PATTERNS:
+        PATTERNS.pop(raw_pattern)
+        save_patterns(PATTERNS)
+        return True, "Removido"
+    return False, "Não achou padrão"
+
+
+# =====================================================================
+# NORMALIZAÇÃO E SUBSTITUIÇÕES (USADAS NA RENOMEAÇÃO)
+# =====================================================================
+def _normalizar_texto(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("ASCII")
+    s = re.sub(r"[^A-Z0-9 ]+", " ", s.upper())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
+    nome_norm = _normalizar_texto(nome_raw)
+    cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
+    if "SABARA" in nome_norm:
+        return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
+    for padrao in sorted(PATTERNS.keys(), key=lambda x: len(x), reverse=True):
+        if _normalizar_texto(padrao) in nome_norm:
+            return PATTERNS[padrao]
+    return re.sub(r"\s+", "_", nome_norm)
+
+
+def limpar_emitente(nome: str) -> str:
+    if not nome:
         return "SEM_NOME"
-    name = unicodedata.normalize("NFKD", name).encode("ASCII", "ignore").decode("ASCII")
-    name = re.sub(r'[^A-Z0-9_]+', '_', name.upper())
-    return re.sub(r'_+', '_', name).strip('_')
+    nome = unicodedata.normalize("NFKD", nome).encode("ASCII", "ignore").decode("ASCII")
+    nome = re.sub(r"[^A-Z0-9_]+", "_", nome.upper())
+    return re.sub(r"_+", "_", nome).strip("_")
 
-def clean_num(num: str) -> str:
-    if not num:
+
+def limpar_numero(numero: str) -> str:
+    if not numero:
         return "0"
-    out = re.sub(r'[^\d]', '', str(num))
-    return out.lstrip("0") or "0"
+    numero = re.sub(r"[^\d]", "", str(numero))
+    return numero.lstrip("0") or "0"
 
-def validate_and_fix(d: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(d, dict):
-        d = {}
-    for k in ("emitente", "numero_nota", "cidade"):
-        if k not in d or not d[k]:
-            d[k] = "NÃO_IDENTIFICADO"
-    if 'numero_nota' in d:
-        cleaned = re.sub(r'[^\d]', '', str(d['numero_nota']))
-        d['numero_nota'] = cleaned if cleaned else "000000"
-    return d
 
-# ---------------------------
-# GEMINI CONFIG (safe)
-# ---------------------------
+def validar_e_corrigir_dados(dados):
+    """Valida e corrige dados extraídos da IA"""
+    if not isinstance(dados, dict):
+        dados = {}
+    required_fields = ["emitente", "numero_nota", "cidade"]
+    for field in required_fields:
+        if field not in dados or not dados[field]:
+            dados[field] = "NÃO_IDENTIFICADO"
+    correcoes = {
+        "emitente": {
+            "CPFL ENERGIA": "CPFL",
+            "COMPANHIA PAULISTA DE FORCA E LUZ": "CPFL",
+            "SABARA": "SABARA",
+        }
+    }
+    for field, correcoes_field in correcoes.items():
+        if field in dados:
+            for incorreto, correto in correcoes_field.items():
+                if incorreto in dados[field].upper():
+                    dados[field] = correto
+                    break
+    if "numero_nota" in dados:
+        numero_limpo = re.sub(r"[^\d]", "", str(dados["numero_nota"]))
+        dados["numero_nota"] = numero_limpo if numero_limpo else "000000"
+    return dados
+
+
+# =====================================================================
+# CONFIGURAÇÃO GEMINI
+# =====================================================================
 if hasattr(st, "secrets") and st.secrets.get("GOOGLE_API_KEY"):
     GEMINI_API_KEY = st.secrets["GOOGLE_API_KEY"]
 else:
     GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 if not GEMINI_API_KEY:
-    st.error("❌ GOOGLE_API_KEY não encontrada. Coloque em st.secrets ou variável de ambiente.")
+    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
     st.stop()
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    MODEL_NAME = os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
-    model = genai.GenerativeModel(MODEL_NAME)
-    st.sidebar.success("✅ Gemini pronto")
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash-exp"))
+    st.sidebar.success("✅ Gemini configurado")
 except Exception as e:
-    st.error(f"❌ Erro ao configurar Gemini: {e}")
+    st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
     st.stop()
 
-# ---------------------------
-# GEMINI / retry logic
-# ---------------------------
-def calc_delay(attempt: int, err_msg: str = "") -> int:
-    base = MIN_RETRY_DELAY * (attempt + 1)
-    if not err_msg:
+
+# =====================================================================
+# FUNÇÕES DE RETRY E PROCESSAMENTO INDIVIDUAL
+# =====================================================================
+def calcular_delay(tentativa, error_msg):
+    """Cálculo de delay seguro para Streamlit Cloud."""
+    base = MIN_RETRY_DELAY * (tentativa + 1)
+    if not error_msg:
         return min(base, MAX_RETRY_DELAY)
-    em = str(err_msg).lower()
-    m = re.search(r'retry in (\d+\.?\d*)s', em)
-    if m:
+    try:
+        em = (error_msg or "").lower()
+    except Exception:
+        em = ""
+    if "retry in" in em:
         try:
-            return min(int(float(m.group(1)) + 2), MAX_RETRY_DELAY)
+            seg = float(re.search(r"retry in (\d+\.?\d*)s", em).group(1))
+            return min(seg + 2, MAX_RETRY_DELAY)
         except Exception:
             pass
     return min(base, MAX_RETRY_DELAY)
 
-def process_page_gemini(prompt_instr: str, page_bytes: bytes, timeout: int = 60) -> Tuple[Dict[str, Any], bool, float, str]:
-    for attempt in range(MAX_RETRIES + 1):
+
+def processar_pagina_gemini_single(prompt_instrucao: str, page_bytes: bytes, timeout: int = 60):
+    """Processa uma página com retry. Retorna (dados, ok, tempo, provider)."""
+    for tentativa in range(MAX_RETRIES + 1):
         try:
             start = time.time()
             resp = model.generate_content(
-                [prompt_instr, {"mime_type": "application/pdf", "data": page_bytes}],
+                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_bytes}],
                 generation_config={"response_mime_type": "application/json"},
-                request_options={"timeout": timeout}
+                request_options={"timeout": timeout},
             )
-            t = round(time.time() - start, 2)
-            txt = (resp.text or "").strip()
-            if txt.startswith("```"):
-                txt = txt.replace("```json", "").replace("```", "").strip()
+            tempo = round(time.time() - start, 2)
+
+            texto = (resp.text or "").strip()
+            if texto.startswith("```"):
+                texto = texto.replace("```json", "").replace("```", "").strip()
+
             try:
-                data = json.loads(txt)
+                dados = json.loads(texto)
             except Exception:
-                data = {"error": "Resposta não é JSON", "_raw": txt[:800]}
-            return data, True, t, "Gemini"
+                dados = {"error": "Resposta não era JSON válido", "_raw": texto[:600]}
+
+            return dados, True, tempo, "Gemini"
+
         except ResourceExhausted as e:
-            delay = calc_delay(attempt, str(e))
+            delay = calcular_delay(tentativa, str(e))
             time.sleep(delay)
+
         except Exception as e:
-            if attempt < MAX_RETRIES:
+            if tentativa < MAX_RETRIES:
                 time.sleep(MIN_RETRY_DELAY)
             else:
-                return {"error": str(e)}, False, 0.0, "Gemini"
-    return {"error": "Máximo de tentativas excedido"}, False, 0.0, "Gemini"
+                return {"error": str(e)}, False, 0, "Gemini"
 
-# ---------------------------
-# SIDEBAR: CONFIGURAÇÕES & PATTERNS UI (compact)
-# ---------------------------
+    return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
+
+
+# =====================================================================
+# SIDEBAR: Configurações + UI de Padrões
+# =====================================================================
 with st.sidebar:
-    st.header("⚙️ Configurações")
-    use_cache = st.checkbox("Usar cache local", value=True)
-    worker_count = st.number_input("Threads (workers)", min_value=1, max_value=8, value=MAX_WORKERS_DEFAULT, step=1)
+    st.markdown("### 🔧 Configurações")
+    use_cache = st.checkbox("Usar Cache", value=True)
+
+    st.markdown("#### Threads (Turbo Seguro)")
+    worker_count = st.number_input(
+        "Workers",
+        min_value=1,
+        max_value=8,
+        value=MAX_WORKERS_DEFAULT,
+        step=1,
+    )
+
     st.markdown("---")
-    st.markdown("### 🧩 Padrões")
-    with st.expander("Ver/Editar padrões"):
-        cols = st.columns([2, 1, 1])
-        with cols[0]:
-            new_raw = st.text_input("Texto a reconhecer", key="p_new_raw")
-        with cols[1]:
-            new_sub = st.text_input("Substituto", key="p_new_sub")
-        with cols[2]:
-            if st.button("➕ Adicionar", key="p_add"):
-                if new_raw and new_sub:
-                    ok, msg = (True, "Adicionado")
-                    try:
-                        ok, msg = (add_pattern := (lambda r, s: (False, "Conflito")))(new_raw, new_sub)  # placeholder to preserve UI expectation
-                    except Exception:
-                        ok, msg = True, "Adicionado (fallback)"
-                else:
-                    st.warning("Preencha ambos os campos")
-        st.write("Padrões atuais:")
+    st.markdown("### 🧩 Padrões de Renomeação")
+
+    with st.expander("📋 Ver padrões existentes"):
         for k, v in PATTERNS.items():
-            st.write(f"- `{k}` → `{v}`")
+            st.markdown(f"- `{k}` → `{v}`")
+
+    st.markdown("**Adicionar novo padrão**")
+    new_pat_raw = st.text_input("Texto a reconhecer", key="new_pat_raw")
+    new_pat_sub = st.text_input("Substituto", key="new_pat_sub")
+
+    if st.button("➕ Adicionar padrão"):
+        if new_pat_raw and new_pat_sub:
+            ok, msg = add_pattern(new_pat_raw, new_pat_sub)
+            if ok:
+                st.success(msg)
+                time.sleep(0.12)
+                st.rerun()
+            else:
+                st.warning(msg)
+        else:
+            st.warning("Preencha ambos os campos")
+
+    st.markdown("**Editar / Excluir**")
+    edit_sel = st.selectbox("Selecione um padrão", [""] + list(PATTERNS.keys()))
+
+    if edit_sel:
+        col_e1, col_e2 = st.columns([2, 1])
+        with col_e1:
+            edit_raw = st.text_input("Padrão", value=edit_sel)
+            edit_sub = st.text_input("Substituto", value=PATTERNS.get(edit_sel, ""))
+
+        with col_e2:
+            if st.button("✏️ Salvar"):
+                ok, msg = edit_pattern(edit_sel, edit_raw, edit_sub)
+                if ok:
+                    st.success(msg)
+                    time.sleep(0.12)
+                    st.rerun()
+                else:
+                    st.warning(msg)
+
+            if st.button("🗑️ Excluir"):
+                ok, msg = remove_pattern(edit_sel)
+                if ok:
+                    st.success(msg)
+                    time.sleep(0.12)
+                    st.rerun()
+                else:
+                    st.warning(msg)
+
     st.markdown("---")
-    if st.button("🧹 Limpar cache (manual)"):
+    if st.button("🧹 Limpar cache"):
         document_cache.clear()
-        st.success("Cache limpo")
+        st.success("Cache limpo!")
+        time.sleep(0.12)
+        st.rerun()
 
-# NOTE: the add_pattern placeholder above is only for UI continuity.
-# Real add/edit/remove implemented below in the main body where form submissions are handled.
 
-# ---------------------------
-# MAIN UI: Upload + Process
-# ---------------------------
+# =====================================================================
+# DASHBOARD ANALÍTICO
+# =====================================================================
+def criar_dashboard_analitico():
+    if "resultados" not in st.session_state:
+        return
+
+    st.markdown("---")
+    st.markdown("### 📊 Dashboard Analítico")
+
+    resultados = st.session_state["resultados"]
+    logs = st.session_state.get("processed_logs", [])
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric("📁 Arquivos", len(resultados))
+
+    with col2:
+        total_paginas = sum(r.get("pages", 1) for r in resultados)
+        st.metric("📄 Páginas", total_paginas)
+
+    with col3:
+        sucessos = len([log for log in logs if log[2] == "OK"])
+        st.metric("✅ Sucessos", sucessos)
+
+    with col4:
+        erros = len([log for log in logs if log[2] != "OK"])
+        st.metric("❌ Erros", erros)
+
+    if resultados:
+        st.markdown("#### 📈 Emitentes mais frequentes")
+        emitentes = {}
+        for r in resultados:
+            em = r.get("emitente", "Desconhecido")
+            emitentes[em] = emitentes.get(em, 0) + 1
+
+        for em, qtd in sorted(emitentes.items(), key=lambda x: x[1], reverse=True)[:5]:
+            st.write(f"`{em}`: {qtd} doc(s)")
+
+
+# =====================================================================
+# UPLOAD + PROCESSAMENTO MULTITHREAD POR PÁGINA (OPÇÃO A — TURBO)
+# =====================================================================
 st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown("### 📎 Enviar PDFs")
-uploaded_files = st.file_uploader("Selecione PDFs (multi)", type=["pdf"], accept_multiple_files=True, key="uploader")
-col1, col2, col3 = st.columns([1,1,1])
-with col1:
-    process_btn = st.button("🚀 Processar (Turbo)")
-with col2:
-    split_mode = st.checkbox("Ativar separador de páginas (mantido)", value=True)
-with col3:
-    clear_session = st.button("♻ Limpar sessão (arquivos temporários)")
+st.markdown("### 📎 Enviar PDFs e processar")
+
+uploaded_files = st.file_uploader(
+    "Selecione arquivos PDF",
+    type=["pdf"],
+    accept_multiple_files=True,
+    key="uploader",
+)
+
+col_up_a, col_up_b = st.columns([1, 1])
+with col_up_a:
+    process_btn = st.button("🚀 Processar PDFs")
+with col_up_b:
+    clear_session = st.button("♻️ Limpar sessão")
+
 st.markdown("</div>", unsafe_allow_html=True)
 
+# ---------------------------------------------------------------------
+# LIMPAR SESSÃO
+# ---------------------------------------------------------------------
 if clear_session:
-    sf = st.session_state.get("session_folder")
-    if sf:
+    if "session_folder" in st.session_state:
         try:
-            shutil.rmtree(sf, ignore_errors=True)
+            shutil.rmtree(st.session_state["session_folder"])
         except Exception:
             pass
-    for k in ["resultados", "session_folder", "processed_logs", "novos_nomes", "files_meta", "selected_files", "_manage_target"]:
+
+    for k in [
+        "resultados",
+        "session_folder",
+        "novos_nomes",
+        "processed_logs",
+        "files_meta",
+        "selected_files",
+        "_manage_target",
+    ]:
         st.session_state.pop(k, None)
-    st.success("Sessão limpa")
-    # no forced rerun — user sees confirmation
 
-# helper: ensure session state keys
-if "processed_logs" not in st.session_state:
-    st.session_state["processed_logs"] = []
-if "resultados" not in st.session_state:
-    st.session_state["resultados"] = []
+    st.success("Sessão limpa.")
+    time.sleep(0.12)
+    st.rerun()
 
-# ---------------------------
-# PROCESS ACTION
-# ---------------------------
+# ---------------------------------------------------------------------
+# PROCESSAMENTO
+# ---------------------------------------------------------------------
 if uploaded_files and process_btn:
-    # prepare
+
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     session_folder.mkdir(exist_ok=True)
-    arquivos = []
-    total_pages = 0
 
+    arquivos = []
+    total_paginas = 0
+
+    # -----------------------------
+    # Ler PDFs e contar páginas (uma leitura por arquivo — cache)
+    # -----------------------------
     for f in uploaded_files:
         try:
-            fb = f.read()
-            reader = PdfReader(io.BytesIO(fb))
-            npg = len(reader.pages)
-            arquivos.append({"name": f.name, "bytes": fb, "pages": npg})
-            total_pages += npg
-        except Exception as e:
-            st.warning(f"Erro ao ler {f.name}: {e}")
+            b = f.read()
+            # cria reader e manter em memória para reuso
+            reader = PdfReader(io.BytesIO(b))
+            n_pages = len(reader.pages)
+            total_paginas += n_pages
 
-    if total_pages > MAX_TOTAL_PAGES:
-        st.warning(f"Total de páginas ({total_pages}) maior que limite {MAX_TOTAL_PAGES}. Considere reduzir lote.")
-    st.info(f"Total de páginas: {total_pages}")
+            arquivos.append({"name": f.name, "bytes": b, "pages": n_pages, "reader": reader})
+        except Exception:
+            st.warning(f"❌ Erro ao abrir {f.name}, ignorado.")
 
-    # prepare progress
+    st.info(f"📄 Total de páginas a processar: **{total_paginas}**")
+
+    # -----------------------------
+    # Preparação
+    # -----------------------------
+    agrupados_bytes = {}
+    resultados_meta = []
+    processed_logs = []
+
     progresso = 0
     progress_bar = st.progress(0.0)
     progresso_text = st.empty()
+
     start_all = time.time()
 
     prompt = (
-        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
-        "Responda APENAS em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUM\",\"cidade\":\"CIDADE\"}"
+        "Analise a nota fiscal (DANFE). "
+        "Extraia emitente, número da nota e cidade. "
+        "Retorne SOMENTE JSON no formato: "
+        '{"emitente":"NOME","numero_nota":"NUM","cidade":"CIDADE"}'
     )
 
-    agrupados: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-    processed_logs: List[Tuple[str, float, str, str, str]] = []
+    worker_count = int(st.session_state.get("worker_count", MAX_WORKERS_DEFAULT))
 
-    # process each file (pages parallelized)
-    for ar in arquivos:
-        fname = ar["name"]
-        fb = ar["bytes"]
-        npg = ar["pages"]
+    # -----------------------------------------------------------
+    # LOOP DOS ARQUIVOS
+    # -----------------------------------------------------------
+    for arquivo in arquivos:
 
-        cache_key = document_cache.key_for_file(fb, prompt)
+        fname = arquivo["name"]
+        file_bytes = arquivo["bytes"]
+        n_pages = arquivo["pages"]
+        reader = arquivo.get("reader")  # PdfReader já aberto
+
+        # ---------- CACHE POR ARQUIVO INTEIRO ----------
+        cache_key = document_cache.get_cache_key_file(file_bytes, prompt)
         cached = document_cache.get(cache_key) if use_cache else None
 
         if cached:
             page_results = cached.get("page_results", [])
         else:
-            # extract pages
-            try:
-                reader = PdfReader(io.BytesIO(fb))
-            except Exception as e:
-                processed_logs.append((fname, 0.0, "ERRO_LEITURA", str(e), "local"))
-                continue
-
+            # -------------------------------------------
+            # Extração das páginas e criação de jobs
+            # -------------------------------------------
             page_jobs = []
-            for idx, p in enumerate(reader.pages):
-                buf = io.BytesIO()
+            for idx, page in enumerate(reader.pages):
+                # montar bytes por página (evita reabrir arquivo inteiro depois)
+                b_io = io.BytesIO()
                 w = PdfWriter()
-                w.add_page(p)
-                w.write(buf)
-                page_jobs.append((idx, buf.getvalue()))
+                try:
+                    w.add_page(page)
+                    w.write(b_io)
+                    page_jobs.append((idx, b_io.getvalue()))
+                except Exception:
+                    # se não conseguir isolar a página, registra erro no lugar
+                    page_jobs.append((idx, None))
 
+            # -------------------------------------------
+            # Execução paralela verdadeira por página
+            # -------------------------------------------
             page_results = [None] * len(page_jobs)
             with ThreadPoolExecutor(max_workers=worker_count) as ex:
-                future_map = {ex.submit(process_page_gemini, prompt, job_bytes): job_index for job_index, job_bytes in page_jobs}
+                future_map = {}
+                for job_index, job_bytes in page_jobs:
+                    if job_bytes is None:
+                        # resposta imediata de erro se não conseguimos gerar bytes da página
+                        page_results[job_index] = ({"error": "Erro ao extrair página"}, False, 0, "Local")
+                    else:
+                        future = ex.submit(processar_pagina_gemini_single, prompt, job_bytes)
+                        future_map[future] = job_index
+
                 for future in as_completed(future_map):
                     idx = future_map[future]
                     try:
                         page_results[idx] = future.result()
                     except Exception as e:
-                        page_results[idx] = ({"error": str(e)}, False, 0.0, "Gemini")
+                        page_results[idx] = ({"error": str(e)}, False, 0, "Gemini")
 
+            # Salvar no cache
             if use_cache:
                 document_cache.set(cache_key, {"page_results": page_results, "generated_at": time.time()})
 
-        # iterate page results in order
-        for page_idx, res in enumerate(page_results):
-            progresso += 1
-            progress_bar.progress(min(progresso / max(1, total_pages), 1.0))
+        # -----------------------------------------------------------
+        # PROCESSAR RESPOSTAS INDIVIDUAIS
+        # -----------------------------------------------------------
+        for page_idx, result in enumerate(page_results):
 
-            if res is None:
-                processed_logs.append((f"{fname} (p{page_idx+1})", 0.0, "ERRO_IA", "Sem resposta", "Gemini"))
-                progresso_text.info(f"⚠️ {fname} (p{page_idx+1}) — sem resposta")
+            if result is None:
+                processed_logs.append((f"{fname} (pág {page_idx+1})", 0, "ERRO_IA", "Sem resposta", "Gemini"))
+                progresso += 1
+                # atualizar barra
+                if total_paginas:
+                    progress_bar.progress(min(progresso / total_paginas, 1.0))
                 continue
 
-            dados, ok, t, provider = res
-            label = f"{fname} (p{page_idx+1})"
+            dados, ok, tempo, provider = result
+            page_label = f"{fname} (pág {page_idx+1})"
+
+            # --------- ERRO GEMINI ---------
             if not ok or "error" in dados:
-                processed_logs.append((label, t, "ERRO_IA", dados.get("error", str(dados)), provider))
-                progresso_text.warning(f"⚠️ {label} — erro")
+                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", "erro"), provider))
+                progresso += 1
+                if total_paginas:
+                    progress_bar.progress(min(progresso / total_paginas, 1.0))
+                progresso_text.markdown(f"<div class='warning-log'>⚠️ {page_label} — ERRO</div>", unsafe_allow_html=True)
                 continue
 
-            dados = validate_and_fix(dados)
+            # --------- VALIDAR DADOS EXTRAÍDOS ---------
+            dados = validar_e_corrigir_dados(dados)
+
             emit_raw = dados.get("emitente", "")
             num_raw = dados.get("numero_nota", "")
             cid_raw = dados.get("cidade", "")
 
-            numero = clean_num(num_raw)
-            nome_map = substitute_emitente(emit_raw, cid_raw)
-            emitente = clean_emitente(nome_map)
+            numero = limpar_numero(num_raw)
+            nome_map = substituir_nome_emitente(emit_raw, cid_raw)
+            emitente = limpar_emitente(nome_map)
 
             key = (numero, emitente)
-            agrupados.setdefault(key, []).append({"arquivo": fname, "pagina": page_idx})
-            processed_logs.append((label, t, "OK", f"{numero}/{emitente}", provider))
-            progresso_text.success(f"✅ {label} — OK ({t:.2f}s)")
 
-    # build final PDFs grouped
+            if key not in agrupados_bytes:
+                agrupados_bytes[key] = []
+
+            agrupados_bytes[key].append({"arquivo": fname, "pagina": page_idx})
+
+            processed_logs.append((page_label, tempo, "OK", f"{numero}/{emitente}", provider))
+
+            progresso += 1
+            if total_paginas and (progresso % 3 == 0 or progresso == total_paginas):
+                progress_bar.progress(min(progresso / total_paginas, 1.0))
+
+            progresso_text.markdown(f"<div class='success-log'>✅ {page_label} — OK ({tempo:.2f}s)</div>", unsafe_allow_html=True)
+
+    # =====================================================================
+    # GERAR PDFs FINAIS AGRUPADOS
+    # =====================================================================
     resultados = []
     files_meta = {}
-    arquivos_map = {a["name"]: a["bytes"] for a in arquivos}
+    # construir map de leitores para evitar reabertura
+    leitores_map = {}
+    for a in arquivos:
+        leitores_map[a["name"]] = PdfReader(io.BytesIO(a["bytes"]))
 
-    for (numero, emitente), pages in agrupados.items():
+    for (numero, emitente), lista_paginas in agrupados_bytes.items():
+
         if not numero or numero == "0":
             continue
+
         writer = PdfWriter()
-        added = 0
-        for item in pages:
+        count_added = 0
+
+        for item in lista_paginas:
             orig = item["arquivo"]
             pg = item["pagina"]
-            fb = arquivos_map.get(orig)
-            if not fb:
+
+            reader_local = leitores_map.get(orig)
+            if not reader_local:
                 continue
             try:
-                r = PdfReader(io.BytesIO(fb))
-                if 0 <= pg < len(r.pages):
-                    writer.add_page(r.pages[pg])
-                    added += 1
+                if 0 <= pg < len(reader_local.pages):
+                    writer.add_page(reader_local.pages[pg])
+                    count_added += 1
             except Exception:
                 continue
-        if added == 0:
-            continue
-        out_name = f"DOC {numero}_{emitente}.pdf"
-        out_path = session_folder / out_name
-        try:
-            with open(out_path, "wb") as f:
-                writer.write(f)
-        except Exception as e:
-            st.warning(f"Erro ao escrever {out_name}: {e}")
-            continue
-        resultados.append({"file": out_name, "numero": numero, "emitente": emitente, "pages": added})
-        files_meta[out_name] = {"numero": numero, "emitente": emitente, "pages": added}
 
-    # save state
+        if count_added == 0:
+            continue
+
+        nome_pdf = f"DOC {numero}_{emitente}.pdf"
+        path_out = session_folder / nome_pdf
+
+        try:
+            with open(path_out, "wb") as f_out:
+                writer.write(f_out)
+        except Exception as e:
+            processed_logs.append((nome_pdf, 0, "ERRO_ESCRITA", str(e), "Local"))
+            continue
+
+        resultados.append({"file": nome_pdf, "numero": numero, "emitente": emitente, "pages": count_added})
+        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": count_added}
+
+    # =====================================================================
+    # SALVAR ESTADO
+    # =====================================================================
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
+    st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
     st.session_state["processed_logs"] = processed_logs
     st.session_state["files_meta"] = files_meta
-    st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
 
-    elapsed = round(time.time() - start_all, 2)
-    st.success(f"✅ Processamento concluído — {len(resultados)} arquivos gerados em {elapsed}s")
-    criar_dashboard = True
+    st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
 
-# ---------------------------
-# DASHBOARD + FILES VIEW (compact, elegant)
-# ---------------------------
-if "resultados" in st.session_state and st.session_state["resultados"]:
+    criar_dashboard_analitico()
+    time.sleep(0.12)
+    st.rerun()
+
+
+# =====================================================================
+# PAINEL FINAL DE ARQUIVOS GERADOS
+# =====================================================================
+if "session_folder" in st.session_state and "resultados" in st.session_state:
+
     st.markdown("---")
-    st.subheader("📁 Arquivos gerados")
+    st.header("📁 Arquivos Gerados")
+
     session_folder = Path(st.session_state["session_folder"])
     resultados = st.session_state["resultados"]
-    files_meta = st.session_state.get("files_meta", {})
-    novos_nomes = st.session_state.get("novos_nomes", {})
+    novos_nomes = st.session_state["novos_nomes"]
+    files_meta = st.session_state["files_meta"]
 
-    col_a, col_b = st.columns([3,1])
-    with col_a:
-        q = st.text_input("🔎 Buscar por nome / emitente / número", key="search_box")
-    with col_b:
-        if st.button("📦 Baixar selecionados"):
-            sel = st.session_state.get("selected_files", [])
-            if not sel:
-                st.warning("Nenhuma seleção")
-            else:
-                mem = io.BytesIO()
-                with zipfile.ZipFile(mem, "w") as zf:
-                    for fn in sel:
-                        p = session_folder / fn
-                        if p.exists():
-                            arc = novos_nomes.get(fn, fn)
-                            zf.write(p, arcname=arc)
-                mem.seek(0)
-                st.download_button("⬇️ Confirmar ZIP", data=mem, file_name="selecionadas.zip", mime="application/zip")
+    if not session_folder.exists():
+        st.error("❌ Pasta da sessão não existe mais.")
+        st.stop()
 
-    visible = resultados
-    if q:
-        Q = q.strip().upper()
-        visible = [r for r in resultados if Q in r["file"].upper() or Q in r["emitente"].upper() or Q in r["numero"].upper()]
+    # --------------------------
+    # LISTA DOS ARQUIVOS
+    # --------------------------
+    for idx, r in enumerate(resultados):
 
-    # listing
-    for idx, r in enumerate(visible):
-        old = r["file"]
-        new = novos_nomes.get(old, old)
-        cols = st.columns([0.06, 2, 1, 1])
-        checked = old in st.session_state.get("selected_files", [])
-        cb = cols[0].checkbox("", value=checked, key=f"cb_{old}")
-        if cb and old not in st.session_state.get("selected_files", []):
-            st.session_state.setdefault("selected_files", []).append(old)
-        if (not cb) and old in st.session_state.get("selected_files", []):
-            st.session_state["selected_files"].remove(old)
-        # name + rename
-        cols[1].text_input(" ", value=new, key=f"name_{old}", label_visibility="collapsed")
-        # download + delete
-        if cols[2].button("⬇️", key=f"dl_{old}"):
-            p = session_folder / old
-            if p.exists():
-                with open(p, "rb") as f:
-                    st.download_button("⬇️ Baixar", data=f, file_name=new, mime="application/pdf", key=f"dd_{old}")
-        if cols[3].button("🗑️", key=f"rm_{old}"):
+        old_name = r["file"]
+        new_name = novos_nomes.get(old_name, old_name)
+        file_path = session_folder / old_name
+
+        card_css = f"""
+        <div class="card" style="margin-top:10px;border-left:4px solid #0f4c81;">
+            <div style="font-weight:600;font-size:18px;">📄 {old_name}</div>
+        """
+        st.markdown(card_css, unsafe_allow_html=True)
+
+        colA, colB, colC = st.columns([3, 3, 1])
+
+        # --------------------------
+        # RENOMEAÇÃO
+        # --------------------------
+        with colA:
+            new_name_input = st.text_input(f"Novo nome para {old_name}", value=new_name, key=f"name_{idx}")
+
+        with colB:
+            if st.button("💾 Salvar nome", key=f"save_{idx}"):
+                if new_name_input.strip():
+                    novos_nomes[old_name] = new_name_input.strip()
+                    st.session_state["novos_nomes"] = novos_nomes
+                    st.success("Nome atualizado!")
+                    time.sleep(0.08)
+                    st.rerun()
+
+        # --------------------------
+        # AÇÕES DO ARQUIVO
+        # --------------------------
+        with colC:
+            if st.button("🗑️", key=f"del_{idx}"):
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+                resultados = [x for x in resultados if x["file"] != old_name]
+                st.session_state["resultados"] = resultados
+                novos_nomes.pop(old_name, None)
+                st.success("Arquivo excluído.")
+                time.sleep(0.08)
+                st.rerun()
+
+        # --------------------------
+        # PREVIEW + DOWNLOAD
+        # --------------------------
+        colD, colE = st.columns([1, 5])
+
+        with colD:
             try:
-                (session_folder / old).unlink()
+                with open(file_path, "rb") as f_down:
+                    st.download_button("⬇️ Baixar PDF", data=f_down, file_name=new_name, mime="application/pdf", key=f"down_{idx}")
             except Exception:
-                pass
-            st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != old]
-            st.success("Arquivo removido")
-            st.experimental_rerun()
+                st.warning("Arquivo indisponível para download (foi excluído).")
 
+        with colE:
+            meta = files_meta.get(old_name, {})
+            st.markdown(
+                f"<div class='small-note'>📎 {meta.get('pages', '-') } páginas — {meta.get('emitente', '-') } / NF {meta.get('numero', '-')}</div>",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ---------------------------------------------------------------------
+    # EXTRA: SEPARAR PÁGINAS INDIVIDUAIS DOS PDFs GERADOS
+    # ---------------------------------------------------------------------
     st.markdown("---")
-    # separation tool (keeps as requested)
-    if split_mode:
-        st.subheader("✂️ Separar páginas de um PDF gerado")
-        sel = st.selectbox("Escolha arquivo", [""] + [r["file"] for r in st.session_state["resultados"]], key="split_sel")
-        if sel:
-            p = session_folder / sel
-            try:
-                reader = PdfReader(str(p))
-                npg = len(reader.pages)
-                st.info(f"Páginas: {npg}")
-                pages_spec = st.text_input("Páginas (ex: 1,3-5)", key="split_spec")
-                if st.button("✂️ Gerar PDF separado"):
+    st.subheader("✂️ Separar páginas individuais")
+
+    sel_file = st.selectbox("Escolha um arquivo", [""] + [r["file"] for r in resultados], key="split_choice")
+
+    if sel_file:
+        file_path = session_folder / sel_file
+
+        try:
+            reader = PdfReader(str(file_path))
+            n_pages = len(reader.pages)
+
+            st.info(f"📄 Total de páginas: **{n_pages}**")
+
+            col_s1, col_s2 = st.columns([2, 1])
+
+            with col_s1:
+                pages_to_extract = st.text_input("Páginas (ex: 1,2,5-7)", key="split_pages")
+
+            with col_s2:
+                if st.button("✂️ Separar agora"):
                     try:
-                        pages = []
-                        for part in pages_spec.split(","):
+                        pages_list = []
+                        for part in pages_to_extract.split(","):
                             part = part.strip()
                             if "-" in part:
-                                a, b = part.split("-")
-                                pages.extend(list(range(int(a), int(b) + 1)))
-                            elif part:
-                                pages.append(int(part))
+                                parts = part.split("-")
+                                if len(parts) == 2:
+                                    a = int(parts[0])
+                                    b = int(parts[1])
+                                    pages_list.extend(list(range(a, b + 1)))
+                            else:
+                                pages_list.append(int(part))
+
                         writer = PdfWriter()
                         added = 0
-                        for pnum in pages:
-                            if 1 <= pnum <= npg:
-                                writer.add_page(reader.pages[pnum - 1])
+
+                        for p in pages_list:
+                            if 1 <= p <= n_pages:
+                                writer.add_page(reader.pages[p - 1])
                                 added += 1
+
                         if added == 0:
-                            st.warning("Nenhuma página válida")
+                            st.warning("Nenhuma página válida informada.")
                         else:
-                            out_name = f"{sel[:-4]}_split.pdf"
-                            out_path = session_folder / out_name
-                            with open(out_path, "wb") as fo:
-                                writer.write(fo)
-                            with open(out_path, "rb") as fo:
-                                st.download_button("⬇️ Baixar PDF separado", data=fo, file_name=out_name, mime="application/pdf")
-                            st.success(f"Gerado: {out_name} ({added} páginas)")
+                            out_path = session_folder / f"{sel_file[:-4]}_split.pdf"
+                            with open(out_path, "wb") as out_file:
+                                writer.write(out_file)
+
+                            with open(out_path, "rb") as f_out:
+                                st.download_button("⬇️ Baixar PDF separado", data=f_out, file_name=f"{sel_file[:-4]}_split.pdf", mime="application/pdf")
+
+                            st.success(f"Arquivo gerado ({added} páginas).")
+
                     except Exception as e:
-                        st.error(f"Erro: {e}")
-            except Exception as e:
-                st.error(f"Não foi possível ler o arquivo: {e}")
+                        st.error(f"Erro ao separar páginas: {e}")
 
-# ---------------------------
-# LOGS, IMPORT/EXPORT PATTERNS, FINAL
-# ---------------------------
-st.markdown("---")
-st.subheader("🧾 Logs & Padrões")
-logs = st.session_state.get("processed_logs", [])[-300:]
-st.text_area("Logs (recente)", value="\n".join([f"{l[0]} | {l[2]} | {l[3]} | {l[4]}" for l in logs]), height=180)
-
-col1, col2, col3 = st.columns([2,1,1])
-with col2:
-    if st.button("📤 Exportar padrões"):
-        outp = CONFIG_DIR / f"patterns_export_{int(time.time())}.json"
-        try:
-            save_patterns(PATTERNS)
-            with open(outp, "wb") as f:
-                f.write(json.dumps(PATTERNS, ensure_ascii=False, indent=2).encode("utf-8"))
-            with open(outp, "rb") as f:
-                st.download_button("⬇️ Baixar patterns.json", data=f, file_name=outp.name, mime="application/json")
-            st.success("Exportado")
         except Exception as e:
-            st.error(f"Erro: {e}")
+            st.error(f"Erro ao separar páginas: {e}")
 
-with col3:
-    up = st.file_uploader("📥 Importar patterns (.json)", type=["json"], key="imp_patterns")
-    if up is not None:
+
+# =====================================================================
+# BLOCO 6/6 — LOGS AVANÇADOS, EXPORT/IMPORT DE PADRÕES, LIMPEZA E FINALIZAÇÃO
+# =====================================================================
+
+# --- Funções utilitárias adicionais ---
+def export_patterns_to_file(dest: Path):
+    try:
+        save_patterns(PATTERNS)
+        with open(dest, "w", encoding="utf-8") as f:
+            json.dump(PATTERNS, f, ensure_ascii=False, indent=2)
+        return True, f"Exportado para {dest}"
+    except Exception as e:
+        return False, str(e)
+
+
+def import_patterns_from_file(src: Path):
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for k, v in data.items():
+                nk = normalize_pattern_key(k)
+                conflict = False
+                for ek in list(PATTERNS.keys()):
+                    if normalize_pattern_key(ek) == nk and ek != k:
+                        conflict = True
+                        break
+                if not conflict:
+                    PATTERNS[k] = v
+            save_patterns(PATTERNS)
+            return True, "Importado e mesclado."
+        return False, "Arquivo inválido."
+    except Exception as e:
+        return False, str(e)
+
+
+# --- Painel de logs e exportações ---
+st.markdown("---")
+st.markdown("### 🧾 Logs & Exportações")
+
+col_l1, col_l2, col_l3 = st.columns([2, 1, 1])
+with col_l1:
+    recent = st.session_state.get("processed_logs", [])[-500:]
+    st.text_area(
+        "Logs recentes (últimas linhas)",
+        value="\n".join([f"{l[0]} | {l[2]} | {l[3]} | {l[4]}" for l in recent]),
+        height=180,
+        key="logs_area",
+    )
+
+with col_l2:
+    export_path = CONFIG_DIR / f"patterns_export_{int(time.time())}.json"
+    if st.button("📤 Exportar padrões"):
+        ok, msg = export_patterns_to_file(export_path)
+        if ok:
+            with open(export_path, "rb") as f:
+                st.download_button("⬇️ Baixar patterns.json", data=f, file_name=export_path.name, mime="application/json")
+            st.success("Exportado com sucesso.")
+        else:
+            st.error(f"Erro: {msg}")
+
+with col_l3:
+    uploaded_patterns = st.file_uploader("📥 Importar padrões (.json)", type=["json"], key="import_patterns")
+    if uploaded_patterns is not None:
         try:
-            tmp = CONFIG_DIR / f"import_{int(time.time())}.json"
-            with open(tmp, "wb") as f:
-                f.write(up.getvalue())
-            with open(tmp, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                # merge with normalization
-                for k, v in data.items():
-                    nk = normalize_text(k)
-                    conflict = False
-                    for ek in list(PATTERNS.keys()):
-                        if normalize_text(ek) == nk and ek != k:
-                            conflict = True
-                            break
-                    if not conflict:
-                        PATTERNS[k] = v
-                save_patterns(PATTERNS)
-                st.success("Importado e mesclado")
+            temp_import = CONFIG_DIR / f"import_{int(time.time())}.json"
+            with open(temp_import, "wb") as f:
+                f.write(uploaded_patterns.getvalue())
+            ok, msg = import_patterns_from_file(temp_import)
+            if ok:
+                st.success(msg)
                 st.experimental_rerun()
             else:
-                st.error("Arquivo inválido")
+                st.error(msg)
         except Exception as e:
-            st.error(f"Erro: {e}")
+            st.error(str(e))
 
+
+# --- Consolidação e Download ZIP (final) ---
 st.markdown("---")
-st.markdown("🔒 Segurança: use `st.secrets['GOOGLE_API_KEY']` no Streamlit Cloud para maior segurança.")
-st.markdown("💡 Dicas: reduza `Threads` se ocorrerem erros de quota; ative cache para reduzir custos com Gemini.")
+st.markdown("### ✅ Finalizar / Baixar tudo")
 
-# ensure patterns saved on exit
+col_f1, col_f2 = st.columns([1, 2])
+with col_f1:
+    if st.button("📦 Baixar tudo (ZIP final)"):
+        try:
+            mem = io.BytesIO()
+            with zipfile.ZipFile(mem, "w") as zf:
+                for r in st.session_state.get("resultados", []):
+                    fname = r["file"]
+                    src = Path(st.session_state["session_folder"]) / fname
+                    if src.exists():
+                        arcname = st.session_state.get("novos_nomes", {}).get(fname, fname)
+                        zf.write(src, arcname=arcname)
+            mem.seek(0)
+            st.download_button("⬇️ Confirmar download (ZIP)", data=mem, file_name="notas_processadas_final.zip", mime="application/zip")
+            st.success("ZIP pronto para download.")
+        except Exception as e:
+            st.error(f"Erro ao gerar zip: {e}")
+
+with col_f2:
+    if st.button("🧹 Limpar sessão (arquivos temporários)"):
+        try:
+            sf = st.session_state.get("session_folder")
+            if sf and Path(sf).exists():
+                shutil.rmtree(sf, ignore_errors=True)
+            for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
+                st.session_state.pop(k, None)
+            st.success("Sessão limpa — arquivos temporários removidos.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erro ao limpar sessão: {e}")
+
+
+# --- Sugestões de tuning para produção (apenas UI) ---
+st.markdown("---")
+st.markdown("### ⚙️ Dicas rápidas de performance")
+st.markdown(
+    """
+- Reduza `worker_count` se houver instabilidade no provedor de execução.
+- Use `MAX_TOTAL_PAGES` por variável de ambiente para limitar lotes grandes.
+- Em produção, mova o processamento pesado para um worker externo (Celery / Cloud Function) e apenas mostre resultados no Streamlit.
+"""
+)
+
+# --- Segurança: checar uso de secrets ---
+st.markdown("---")
+if hasattr(st, "secrets") and st.secrets.get("GOOGLE_API_KEY"):
+    st.success("🔒 Usando st.secrets para a chave Google (recomendado).")
+else:
+    st.warning("🔑 A chave Google está vindo de variáveis de ambiente. Considere usar st.secrets em produção.")
+
+# --- Final: garantir que patterns estejam salvos ---
 try:
     save_patterns(PATTERNS)
 except Exception:
     pass
+
+# =====================================================================
+# FIM DO ARQUIVO — TURBO v3
+# =====================================================================
