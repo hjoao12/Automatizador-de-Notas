@@ -570,10 +570,11 @@ if clear_session:
     st.rerun()
 
 # ---------------------------------------------------------------------
-# PROCESSAMENTO
+# PROCESSAMENTO — TURBO v4 (Batch 8 + fallback por página)
 # ---------------------------------------------------------------------
 if uploaded_files and process_btn:
 
+    BATCH_SIZE = 8   # número de páginas por lote
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     session_folder.mkdir(exist_ok=True)
@@ -582,17 +583,22 @@ if uploaded_files and process_btn:
     total_paginas = 0
 
     # -----------------------------
-    # Ler PDFs e contar páginas (uma leitura por arquivo — cache)
+    # Ler PDFs e contar páginas
     # -----------------------------
     for f in uploaded_files:
         try:
             b = f.read()
-            # cria reader e manter em memória para reuso
             reader = PdfReader(io.BytesIO(b))
             n_pages = len(reader.pages)
             total_paginas += n_pages
 
-            arquivos.append({"name": f.name, "bytes": b, "pages": n_pages, "reader": reader})
+            arquivos.append({
+                "name": f.name,
+                "bytes": b,
+                "reader": reader,
+                "pages": n_pages
+            })
+
         except Exception:
             st.warning(f"❌ Erro ao abrir {f.name}, ignorado.")
 
@@ -602,7 +608,6 @@ if uploaded_files and process_btn:
     # Preparação
     # -----------------------------
     agrupados_bytes = {}
-    resultados_meta = []
     processed_logs = []
 
     progresso = 0
@@ -611,99 +616,151 @@ if uploaded_files and process_btn:
 
     start_all = time.time()
 
-    prompt = (
-        "Analise a nota fiscal (DANFE). "
-        "Extraia emitente, número da nota e cidade. "
-        "Retorne SOMENTE JSON no formato: "
-        '{"emitente":"NOME","numero_nota":"NUM","cidade":"CIDADE"}'
+    prompt_batch = (
+        "Analise todas as páginas enviadas. "
+        "Para cada página, extraia: emitente, número da nota e cidade. "
+        "Responda exclusivamente um JSON ARRAY no formato:\n"
+        "[{\"pagina\":1, \"emitente\":\"NOME\", \"numero_nota\":\"NUM\", \"cidade\":\"CIDADE\"}, ...]"
     )
 
-    worker_count = int(st.session_state.get("worker_count", MAX_WORKERS_DEFAULT))
+    # -----------------------------------------------------------
+    # Função auxiliar: montar batch
+    # -----------------------------------------------------------
+    def montar_lote(reader, start_page, BATCH_SIZE):
+        paginas = []
+        final = min(start_page + BATCH_SIZE, len(reader.pages))
+        for i in range(start_page, final):
+            buf = io.BytesIO()
+            w = PdfWriter()
+            w.add_page(reader.pages[i])
+            w.write(buf)
+            paginas.append((i, buf.getvalue()))
+        return paginas
 
     # -----------------------------------------------------------
-    # LOOP DOS ARQUIVOS
+    # Loop dos arquivos
     # -----------------------------------------------------------
     for arquivo in arquivos:
 
         fname = arquivo["name"]
+        reader = arquivo["reader"]
         file_bytes = arquivo["bytes"]
         n_pages = arquivo["pages"]
-        reader = arquivo.get("reader")  # PdfReader já aberto
 
-        # ---------- CACHE POR ARQUIVO INTEIRO ----------
-        cache_key = document_cache.get_cache_key_file(file_bytes, prompt)
+        cache_key = document_cache.get_cache_key_file(file_bytes, prompt_batch)
         cached = document_cache.get(cache_key) if use_cache else None
 
         if cached:
-            page_results = cached.get("page_results", [])
+            page_results_final = cached.get("page_results", [])
         else:
-            # -------------------------------------------
-            # Extração das páginas e criação de jobs
-            # -------------------------------------------
-            page_jobs = []
-            for idx, page in enumerate(reader.pages):
-                # montar bytes por página (evita reabrir arquivo inteiro depois)
-                b_io = io.BytesIO()
-                w = PdfWriter()
+            page_results_final = [None] * n_pages
+
+            pagina_atual = 0
+
+            # -----------------------------------------
+            # PROCESSAR EM BATCHES
+            # -----------------------------------------
+            while pagina_atual < n_pages:
+                lote = montar_lote(reader, pagina_atual, BATCH_SIZE)
+
+                # chamada única ao Gemini para até 8 páginas
                 try:
-                    w.add_page(page)
-                    w.write(b_io)
-                    page_jobs.append((idx, b_io.getvalue()))
-                except Exception:
-                    # se não conseguir isolar a página, registra erro no lugar
-                    page_jobs.append((idx, None))
+                    start = time.time()
+                    resp = model.generate_content(
+                        [prompt_batch] + [
+                            {"mime_type": "application/pdf", "data": x[1]}
+                            for x in lote
+                        ],
+                        generation_config={"response_mime_type": "application/json"},
+                        request_options={"timeout": 90}
+                    )
+                    tempo_batch = round(time.time() - start, 2)
+                    txt = resp.text.strip()
 
-            # -------------------------------------------
-            # Execução paralela verdadeira por página
-            # -------------------------------------------
-            page_results = [None] * len(page_jobs)
-            with ThreadPoolExecutor(max_workers=worker_count) as ex:
-                future_map = {}
-                for job_index, job_bytes in page_jobs:
-                    if job_bytes is None:
-                        # resposta imediata de erro se não conseguimos gerar bytes da página
-                        page_results[job_index] = ({"error": "Erro ao extrair página"}, False, 0, "Local")
-                    else:
-                        future = ex.submit(processar_pagina_gemini_single, prompt, job_bytes)
-                        future_map[future] = job_index
+                    if txt.startswith("```"):
+                        txt = txt.replace("```json", "").replace("```", "").strip()
 
-                for future in as_completed(future_map):
-                    idx = future_map[future]
                     try:
-                        page_results[idx] = future.result()
-                    except Exception as e:
-                        page_results[idx] = ({"error": str(e)}, False, 0, "Gemini")
+                        arr = json.loads(txt)
+                    except:
+                        arr = []
 
-            # Salvar no cache
+                    # mapear retorno
+                    mapping = {}
+                    for item in arr:
+                        pg = item.get("pagina")
+                        if isinstance(pg, int):
+                            mapping[pg - 1] = item
+
+                    # aplicar resultados
+                    for (pg_index, _bytes) in lote:
+                        if pg_index in mapping:
+                            item = mapping[pg_index]
+                            page_results_final[pg_index] = (
+                                item,
+                                True,
+                                tempo_batch,
+                                "Gemini-Batch"
+                            )
+                        else:
+                            # marcar como precisando fallback
+                            page_results_final[pg_index] = None
+
+                except Exception as e:
+                    # lote inteiro falhou → todas vão para fallback
+                    for (pg_index, _) in lote:
+                        page_results_final[pg_index] = None
+
+                pagina_atual += BATCH_SIZE
+
+            # -------------------------------------------------------------
+            # FALLBACK TIPO 1 — APENAS páginas falhas vão para retry único
+            # -------------------------------------------------------------
+            for i in range(n_pages):
+                if page_results_final[i] is None:
+                    # processar página individual
+                    buf = io.BytesIO()
+                    w = PdfWriter()
+                    w.add_page(reader.pages[i])
+                    w.write(buf)
+                    pbytes = buf.getvalue()
+
+                    dados, ok, tempo, provider = processar_pagina_gemini_single(
+                        prompt_batch, pbytes
+                    )
+                    page_results_final[i] = (dados, ok, tempo, provider)
+
+            # salvar em cache
             if use_cache:
-                document_cache.set(cache_key, {"page_results": page_results, "generated_at": time.time()})
+                document_cache.set(cache_key, {
+                    "page_results": page_results_final,
+                    "generated_at": time.time()
+                })
 
         # -----------------------------------------------------------
         # PROCESSAR RESPOSTAS INDIVIDUAIS
         # -----------------------------------------------------------
-        for page_idx, result in enumerate(page_results):
+        for page_idx, result in enumerate(page_results_final):
 
             if result is None:
-                processed_logs.append((f"{fname} (pág {page_idx+1})", 0, "ERRO_IA", "Sem resposta", "Gemini"))
+                processed_logs.append(
+                    (f"{fname} (pág {page_idx+1})", 0, "ERRO_IA", "Sem resposta", "Gemini")
+                )
                 progresso += 1
-                # atualizar barra
-                if total_paginas:
-                    progress_bar.progress(min(progresso / total_paginas, 1.0))
+                progress_bar.progress(progresso / total_paginas)
                 continue
 
             dados, ok, tempo, provider = result
             page_label = f"{fname} (pág {page_idx+1})"
 
-            # --------- ERRO GEMINI ---------
             if not ok or "error" in dados:
-                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", "erro"), provider))
+                processed_logs.append(
+                    (page_label, tempo, "ERRO_IA", dados.get("error", "erro"), provider)
+                )
                 progresso += 1
-                if total_paginas:
-                    progress_bar.progress(min(progresso / total_paginas, 1.0))
-                progresso_text.markdown(f"<div class='warning-log'>⚠️ {page_label} — ERRO</div>", unsafe_allow_html=True)
+                progress_bar.progress(progresso / total_paginas)
                 continue
 
-            # --------- VALIDAR DADOS EXTRAÍDOS ---------
             dados = validar_e_corrigir_dados(dados)
 
             emit_raw = dados.get("emitente", "")
@@ -715,29 +772,27 @@ if uploaded_files and process_btn:
             emitente = limpar_emitente(nome_map)
 
             key = (numero, emitente)
-
             if key not in agrupados_bytes:
                 agrupados_bytes[key] = []
 
-            agrupados_bytes[key].append({"arquivo": fname, "pagina": page_idx})
+            agrupados_bytes[key].append({
+                "arquivo": fname,
+                "pagina": page_idx
+            })
 
-            processed_logs.append((page_label, tempo, "OK", f"{numero}/{emitente}", provider))
+            processed_logs.append(
+                (page_label, tempo, "OK", f"{numero}/{emitente}", provider)
+            )
 
             progresso += 1
-            if total_paginas and (progresso % 3 == 0 or progresso == total_paginas):
-                progress_bar.progress(min(progresso / total_paginas, 1.0))
-
-            progresso_text.markdown(f"<div class='success-log'>✅ {page_label} — OK ({tempo:.2f}s)</div>", unsafe_allow_html=True)
+            progress_bar.progress(progresso / total_paginas)
 
     # =====================================================================
-    # GERAR PDFs FINAIS AGRUPADOS
+    # GERAR PDFs FINAIS AGRUPADOS — (idêntico ao seu)
     # =====================================================================
     resultados = []
     files_meta = {}
-    # construir map de leitores para evitar reabertura
-    leitores_map = {}
-    for a in arquivos:
-        leitores_map[a["name"]] = PdfReader(io.BytesIO(a["bytes"]))
+    arquivos_map = {a["name"]: a["bytes"] for a in arquivos}
 
     for (numero, emitente), lista_paginas in agrupados_bytes.items():
 
@@ -751,14 +806,11 @@ if uploaded_files and process_btn:
             orig = item["arquivo"]
             pg = item["pagina"]
 
-            reader_local = leitores_map.get(orig)
-            if not reader_local:
-                continue
             try:
-                if 0 <= pg < len(reader_local.pages):
-                    writer.add_page(reader_local.pages[pg])
-                    count_added += 1
-            except Exception:
+                r = PdfReader(io.BytesIO(arquivos_map[orig]))
+                writer.add_page(r.pages[pg])
+                count_added += 1
+            except:
                 continue
 
         if count_added == 0:
@@ -767,15 +819,21 @@ if uploaded_files and process_btn:
         nome_pdf = f"DOC {numero}_{emitente}.pdf"
         path_out = session_folder / nome_pdf
 
-        try:
-            with open(path_out, "wb") as f_out:
-                writer.write(f_out)
-        except Exception as e:
-            processed_logs.append((nome_pdf, 0, "ERRO_ESCRITA", str(e), "Local"))
-            continue
+        with open(path_out, "wb") as f_out:
+            writer.write(f_out)
 
-        resultados.append({"file": nome_pdf, "numero": numero, "emitente": emitente, "pages": count_added})
-        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": count_added}
+        resultados.append({
+            "file": nome_pdf,
+            "numero": numero,
+            "emitente": emitente,
+            "pages": count_added
+        })
+
+        files_meta[nome_pdf] = {
+            "numero": numero,
+            "emitente": emitente,
+            "pages": count_added
+        }
 
     # =====================================================================
     # SALVAR ESTADO
@@ -786,12 +844,13 @@ if uploaded_files and process_btn:
     st.session_state["processed_logs"] = processed_logs
     st.session_state["files_meta"] = files_meta
 
-    st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
+    st.success(
+        f"🚀 Processamento Turbo v4 concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados."
+    )
 
     criar_dashboard_analitico()
-    time.sleep(0.12)
+    time.sleep(0.15)
     st.rerun()
-
 
 # =====================================================================
 # PAINEL FINAL DE ARQUIVOS GERADOS
