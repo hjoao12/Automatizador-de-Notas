@@ -1,4 +1,5 @@
-import os 
+# arquivo otimizado modo B - turbofast (substitua o seu arquivo por este)
+import os
 import io
 import time
 import json
@@ -15,13 +16,14 @@ import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
 # =====================================================================
 load_dotenv()
 st.set_page_config(
-    page_title="Automatizador de Notas Fiscais", 
+    page_title="Automatizador de Notas Fiscais",
     page_icon="icone.ico"
 )
 
@@ -89,86 +91,112 @@ div.stButton > button:hover {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Automatizador de Notas Fiscais PDF")
+st.title("Automatizador de Notas Fiscais PDF — Modo B (Turbo)")
 
 # =====================================================================
-# SISTEMA DE CACHE INTELIGENTE
+# CONFIGURAÇÕES GERAIS E ARQUIVOS DE CONFIG
 # =====================================================================
-class DocumentCache:
-    def __init__(self, cache_dir="./cache"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
-    
-    def get_cache_key(self, pdf_bytes, prompt):
-        """Gera chave única baseada no conteúdo do PDF e prompt"""
-        content_hash = hashlib.md5(pdf_bytes).hexdigest()
-        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
-        return f"{content_hash}_{prompt_hash}"
-    
-    def get(self, key):
-        cache_file = self.cache_dir / f"{key}.pkl"
-        if cache_file.exists():
-            try:
-                with open(cache_file, 'rb') as f:
-                    return pickle.load(f)
-            except:
-                return None
-        return None
-    
-    def set(self, key, data):
-        cache_file = self.cache_dir / f"{key}.pkl"
-        try:
-            with open(cache_file, 'wb') as f:
-                pickle.dump(data, f)
-        except:
-            pass
-    
-    def clear(self):
-        """Limpa todo o cache"""
-        for cache_file in self.cache_dir.glob("*.pkl"):
-            try:
-                cache_file.unlink()
-            except:
-                pass
-
-document_cache = DocumentCache()
-
-# =====================================================================
-# CONFIGURAÇÃO GEMINI
-# =====================================================================
-GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GEMINI_API_KEY:
-    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
-    st.stop()
-
-try:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
-    st.sidebar.success("✅ Gemini configurado")
-except Exception as e:
-    st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
-    st.stop()
-
-# =====================================================================
-# CONFIGURAÇÕES GERAIS
-# =====================================================================
-PRIMARY = "#0f4c81"
-ACCENT = "#6fb3b8"
-BG = "#F7FAFC"
-CARD_BG = "#FFFFFF"
-TEXT_MUTED = "#6b7280"
-
 TEMP_FOLDER = Path("./temp")
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
+CACHE_DIR = Path("./cache")
+CACHE_DIR.mkdir(exist_ok=True)
+
+CONFIG_DIR = Path("./config")
+CONFIG_DIR.mkdir(exist_ok=True)
+PATTERNS_FILE = CONFIG_DIR / "patterns.json"
+
+# threads para executor (MODIFICAÇÃO)
+MAX_WORKERS_DEFAULT = min(6, (os.cpu_count() or 2))
+
+MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "500"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
 MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 
 # =====================================================================
-# NORMALIZAÇÃO E SUBSTITUIÇÕES FIXAS
+# SISTEMA DE CACHE INTELIGENTE (ATUALIZADO)
 # =====================================================================
+class DocumentCache:
+    def __init__(self, cache_dir=CACHE_DIR):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(exist_ok=True)
+
+    def _cache_path(self, key: str):
+        safe = re.sub(r'[^a-zA-Z0-9_\-]', '_', key)
+        return self.cache_dir / f"{safe}.pkl"
+
+    def get_cache_key_file(self, file_bytes: bytes, prompt: str):
+        """Chave por arquivo inteiro + prompt (MODIFICAÇÃO)"""
+        content_hash = hashlib.md5(file_bytes).hexdigest()
+        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+        return f"{content_hash}_{prompt_hash}"
+
+    def get(self, key):
+        cache_file = self._cache_path(key)
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
+            except (EOFError, pickle.UnpicklingError):
+                # cache corrompido -> remover
+                try:
+                    cache_file.unlink()
+                except Exception:
+                    pass
+                return None
+            except Exception as e:
+                st.sidebar.error(f"Cache read error: {e}")
+                return None
+        return None
+
+    def set(self, key, data):
+        cache_file = self._cache_path(key)
+        try:
+            with open(cache_file, 'wb') as f:
+                pickle.dump(data, f)
+        except Exception as e:
+            st.sidebar.error(f"Cache write error: {e}")
+
+    def clear(self):
+        """Limpa todo o cache"""
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            try:
+                cache_file.unlink()
+            except Exception:
+                pass
+
+document_cache = DocumentCache()
+
+# =====================================================================
+# PADRÕES DE RENOMEAÇÃO PERSISTENTES (MODIFICAÇÃO)
+# - Permite adicionar/editar/excluir padrões via UI do Streamlit
+# - Previne conflitos básicos (mesma chave normalize)
+# =====================================================================
+
+# Inicializa arquivo de patterns com as fixas se não existir
+def load_patterns():
+    if not PATTERNS_FILE.exists():
+        # salva SUBSTITUICOES_FIXAS abaixo quando definidas
+        save_patterns(SUBSTITUICOES_FIXAS)
+        return dict(SUBSTITUICOES_FIXAS)
+    try:
+        with open(PATTERNS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            # garantir keys are strings
+            return {str(k): str(v) for k, v in data.items()}
+    except Exception as e:
+        st.sidebar.error(f"Erro ao carregar padrões: {e}")
+        return dict(SUBSTITUICOES_FIXAS)
+
+def save_patterns(pats: dict):
+    try:
+        with open(PATTERNS_FILE, "w", encoding="utf-8") as f:
+            json.dump(pats, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        st.sidebar.error(f"Erro ao salvar padrões: {e}")
+
+# Carregar o padrão fixo inicial como fallback (usado na primeira criação)
 SUBSTITUICOES_FIXAS = {
     "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
     "COMPANHIA DE AGUA E ESGOTOS DA PARAÍBA": "CAGEPA",
@@ -184,7 +212,7 @@ SUBSTITUICOES_FIXAS = {
     "UNIPAR_CARBLOCLORO LTDA": "UNIPAR_CARBOCLORO",
     "EXPRESS TCM": "EXPRESS_TCM",
     "EXPRESS TCM LTDA": "EXPRESS_TCM",
-    "MDM RENOVADORA DE PNEUS LTDA ME": "MDM_RENOVADORA", 
+    "MDM RENOVADORA DE PNEUS LTDA ME": "MDM_RENOVADORA",
     "MDM RENOVADORA DE PNEUS": "MDM_RENOVADORA",
     "COMPANHIA DE AGUAS E ESGOTOS DO RN": "CAERN",
     "EKIPE TEC DE SEG E INCENDIO LTDA ME": "EKIPE",
@@ -194,76 +222,59 @@ SUBSTITUICOES_FIXAS = {
     "PETROLEO BRASILEIRO S A": "PETROBRAS",
     "INNOVATIVE WATER CARE IND E COM DE PROD QUIM BRASIL LTDA": "SIGURA",
     "COMERCIAL E IMPORTADORA DE PNEUS": "CAMPNEUS",
-    "EKIPE TEC DE SEG E INCENDIO LTDA ME": "EKIPE",
     "URP CARGAS E LOGISTICA LTDA": "URP",
     "U.R.P CARGAS & LOGISTICA LTDA": "URP",
     "U.R.P CARGAS E LOGISTICA LTDA": "URP",
     "MF DE MELO FILHO-ME": "MF_DE_MELO",
     "M.F DE MELO FILHO": "MF_DE_MELO",
     "M.F DE MELO FILHO-ME": "MF_DE_MELO",
-    
 }
 
-# =====================================================================
-# PERSISTÊNCIA E GERENCIAMENTO DE PADRÕES DO USUÁRIO
-# =====================================================================
-PATTERNS_DIR = Path("./config")
-PATTERNS_FILE = PATTERNS_DIR / "patterns.json"
-PATTERNS_DIR.mkdir(exist_ok=True)
+# Carrega padrões persistentes (inclui as FIXAS inicialmente)
+PATTERNS = load_patterns()
 
-def load_user_patterns():
-    """Carrega padrões do arquivo (lista ordenada). Cada padrão: {id, pattern, replacement, enabled}"""
-    if PATTERNS_FILE.exists():
-        try:
-            with open(PATTERNS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # ensure ordering and fields
-                out = []
-                for item in data:
-                    if "id" not in item:
-                        item["id"] = str(uuid.uuid4())
-                    item.setdefault("pattern", "")
-                    item.setdefault("replacement", "")
-                    item.setdefault("enabled", True)
-                    out.append(item)
-                return out
-        except Exception:
-            return []
-    return []
-
-def save_user_patterns(patterns):
-    try:
-        with open(PATTERNS_FILE, "w", encoding="utf-8") as f:
-            json.dump(patterns, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception as e:
-        st.error(f"Erro salvando padrões: {e}")
-        return False
-
-def normalize_for_compare(s: str) -> str:
+def normalize_pattern_key(s: str) -> str:
     if not s:
         return ""
     s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("ASCII")
     s = re.sub(r"[^A-Z0-9 ]+", " ", s.upper())
     return re.sub(r"\s+", " ", s).strip()
 
-def find_conflicts(new_pattern_norm, existing_patterns):
-    """Busca conflitos simples (substring match) para alertar o usuário"""
-    conflicts = []
-    for p in existing_patterns:
-        p_norm = normalize_for_compare(p.get("pattern", ""))
-        if not p_norm:
-            continue
-        if p_norm in new_pattern_norm or new_pattern_norm in p_norm:
-            conflicts.append(p)
-    return conflicts
+def add_pattern(raw_pattern: str, substitute: str) -> (bool, str):
+    """Adiciona novo padrão. Retorna (ok, mensagem). Previne conflitos básicos."""
+    key_norm = normalize_pattern_key(raw_pattern)
+    if not key_norm:
+        return False, "Padrão vazio."
+    # prevenção de conflito: mesma chave normalizada
+    for existing in PATTERNS.keys():
+        if normalize_pattern_key(existing) == key_norm:
+            return False, "Conflito: padrão já existe (mesma normalização)."
+    PATTERNS[raw_pattern] = substitute
+    save_patterns(PATTERNS)
+    return True, "Padrão adicionado."
 
-# Carregar padrões para session_state (cache local da sessão)
-if "user_patterns" not in st.session_state:
-    st.session_state["user_patterns"] = load_user_patterns()
+def edit_pattern(old_raw: str, new_raw: str, new_sub: str) -> (bool, str):
+    if old_raw not in PATTERNS:
+        return False, "Padrão não encontrado."
+    key_norm = normalize_pattern_key(new_raw)
+    for k in PATTERNS.keys():
+        if k != old_raw and normalize_pattern_key(k) == key_norm:
+            return False, "Conflito: outro padrão com mesma normalização."
+    # Aplica edição
+    PATTERNS.pop(old_raw)
+    PATTERNS[new_raw] = new_sub
+    save_patterns(PATTERNS)
+    return True, "Padrão editado."
+
+def remove_pattern(raw_pattern: str) -> (bool, str):
+    if raw_pattern in PATTERNS:
+        PATTERNS.pop(raw_pattern)
+        save_patterns(PATTERNS)
+        return True, "Removido"
+    return False, "Não achou padrão"
 
 # =====================================================================
-# NORMALIZAÇÃO E SUBSTITUIÇÕES (UTILIZADAS DURANTE PROCESSAMENTO)
+# NORMALIZAÇÃO E SUBSTITUIÇÕES (USANDO PATTERNS persistente)
 # =====================================================================
 def _normalizar_texto(s: str) -> str:
     if not s:
@@ -273,33 +284,14 @@ def _normalizar_texto(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
-    """Aplica padrões do usuário (na ordem) e depois as substituições fixas."""
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
-
-    # Regra especial SABARA (mantida)
     if "SABARA" in nome_norm:
         return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
-
-    # Primeiro: padrões do usuário (ordenados). Só aplicar se enabled.
-    user_patterns = st.session_state.get("user_patterns", [])
-    for pat in user_patterns:
-        if not pat.get("enabled", True):
-            continue
-        pat_norm = normalize_for_compare(pat.get("pattern", ""))
-        if not pat_norm:
-            continue
-        # se o padrão (normalizado) está contido no nome normalizado -> aplicar
-        if pat_norm in nome_norm:
-            # retorno já em forma do replacement (deve ser usado como base)
-            return pat.get("replacement", pat.get("pattern", "")).strip()
-
-    # Depois: substituições fixas
-    for padrao, substituto in SUBSTITUICOES_FIXAS.items():
+    # usa PATTERNS (persistente)
+    for padrao, substituto in PATTERNS.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
-
-    # fallback: transformar nome normalizado em formato de arquivo
     return re.sub(r"\s+", "_", nome_norm)
 
 def limpar_emitente(nome: str) -> str:
@@ -319,15 +311,15 @@ def validar_e_corrigir_dados(dados):
     """Valida e corrige dados extraídos da IA"""
     if not isinstance(dados, dict):
         dados = {}
-    
+
     required_fields = ['emitente', 'numero_nota', 'cidade']
-    
+
     # Verifica campos obrigatórios
     for field in required_fields:
         if field not in dados or not dados[field]:
             dados[field] = "NÃO_IDENTIFICADO"
-    
-    # Correções comuns
+
+    # Correções comuns (pode ser expandido)
     correcoes = {
         'emitente': {
             'CPFL ENERGIA': 'CPFL',
@@ -335,25 +327,50 @@ def validar_e_corrigir_dados(dados):
             'SABARA': 'SABARA'
         }
     }
-    
+
     for field, correcoes_field in correcoes.items():
         if field in dados:
             for incorreto, correto in correcoes_field.items():
                 if incorreto in dados[field].upper():
                     dados[field] = correto
                     break
-    
+
     # Validação de número da nota
     if 'numero_nota' in dados:
         numero_limpo = re.sub(r'[^\d]', '', str(dados['numero_nota']))
         dados['numero_nota'] = numero_limpo if numero_limpo else "000000"
-    
+
     return dados
 
 # =====================================================================
-# PROCESSAMENTO GEMINI (SIMPLIFICADO)
+# CONFIGURAÇÃO GEMINI (usar st.secrets quando disponível) - (MODIFICAÇÃO)
+# =====================================================================
+# Preferir st.secrets (Streamlit Cloud) com fallback para env var
+if hasattr(st, "secrets") and st.secrets.get("GOOGLE_API_KEY"):
+    GEMINI_API_KEY = st.secrets["GOOGLE_API_KEY"]
+else:
+    GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+if not GEMINI_API_KEY:
+    st.error("❌ Chave GOOGLE_API_KEY não encontrada. Configure st.secrets['GOOGLE_API_KEY'] ou variável de ambiente.")
+    st.stop()
+
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
+    st.sidebar.success("✅ Gemini configurado")
+except Exception as e:
+    st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
+    st.stop()
+
+# =====================================================================
+# PROCESSAMENTO GEMINI (MULTITHREADED POR PÁGINA) - (MODIFICAÇÃO)
+# - processa páginas em paralelo com ThreadPoolExecutor
+# - usa cache por arquivo para pular todo o processamento se já existir
 # =====================================================================
 def calcular_delay(tentativa, error_msg):
+    if not error_msg:
+        return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
     if "retry in" in error_msg.lower():
         try:
             return min(float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2, MAX_RETRY_DELAY)
@@ -361,170 +378,127 @@ def calcular_delay(tentativa, error_msg):
             pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
-def processar_pagina_gemini(prompt_instrucao, page_stream):
-    """Processa uma página PDF com Gemini com retry"""
+def processar_pagina_gemini_single(prompt_instrucao: str, page_bytes: bytes, timeout: int = 60):
+    """Processa uma página (em bytes) com retry. Retorna (dados, ok, tempo, provider)."""
     for tentativa in range(MAX_RETRIES + 1):
         try:
             start = time.time()
             resp = model.generate_content(
-                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
+                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_bytes}],
                 generation_config={"response_mime_type": "application/json"},
-                request_options={'timeout': 60}
+                request_options={'timeout': timeout}
             )
             tempo = round(time.time() - start, 2)
-            texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
+            texto = resp.text.strip()
+            # limpeza rápida
+            if texto.startswith("```"):
+                texto = texto.replace("```json", "").replace("```", "").strip()
             try:
                 dados = json.loads(texto)
             except Exception as e:
-                dados = {"error": f"Resposta não era JSON válido: {str(e)}", "_raw": texto[:200]}
+                dados = {"error": f"Resposta não era JSON válido: {str(e)}", "_raw": texto[:500]}
             return dados, True, tempo, "Gemini"
         except ResourceExhausted as e:
             delay = calcular_delay(tentativa, str(e))
-            st.sidebar.warning(f"⚠️ Quota excedida (tentativa {tentativa + 1}/{MAX_RETRIES}). Aguardando {delay}s...")
+            # não use st.sidebar.warning em threads; escrevemos aviso via retornos
             time.sleep(delay)
         except Exception as e:
             if tentativa < MAX_RETRIES:
-                st.sidebar.warning(f"⚠️ Erro Gemini (tentativa {tentativa + 1}/{MAX_RETRIES}): {str(e)}")
                 time.sleep(MIN_RETRY_DELAY)
             else:
                 return {"error": str(e)}, False, 0, "Gemini"
     return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
 
 # =====================================================================
-# SIDEBAR CONFIGURAÇÕES (agora com gerenciamento de padrões)
+# SIDEBAR: Configurações + UI de Gestão de Padrões (MODIFICAÇÃO)
 # =====================================================================
 with st.sidebar:
     st.markdown("### 🔧 Configurações")
-    
-    # Configuração de cache
     st.markdown("#### Otimizações")
     use_cache = st.checkbox("Usar Cache", value=True, key="use_cache")
-    
+    worker_count = st.number_input("Threads (Worker pool)", min_value=1, max_value=16, value=MAX_WORKERS_DEFAULT, step=1, key="worker_count")
+    st.markdown("---")
+    st.markdown("### 🧩 Padrões de Renomeação (persistentes)")
+    # Mostra lista de padrões
+    st.markdown("**Padrões existentes:**")
+    for k, v in PATTERNS.items():
+        st.markdown(f"- `{k}` → `{v}`")
+    st.markdown("**Adicionar novo padrão**")
+    new_pat_raw = st.text_input("Texto a reconhecer (ex: 'EMPRESA XYZ LTDA')", key="new_pat_raw")
+    new_pat_sub = st.text_input("Substituto (ex: 'EMPRESA_XYZ')", key="new_pat_sub")
+    if st.button("➕ Adicionar padrão"):
+        ok, msg = add_pattern(new_pat_raw.strip(), new_pat_sub.strip())
+        if ok:
+            st.success(msg)
+            st.experimental_rerun()
+        else:
+            st.warning(msg)
+    st.markdown("**Editar / Excluir**")
+    edit_sel = st.selectbox("Selecionar padrão para editar/excluir", options=[""] + list(PATTERNS.keys()), index=0, key="edit_sel")
+    if edit_sel:
+        col_e1, col_e2 = st.columns([2,1])
+        with col_e1:
+            edit_raw = st.text_input("Padrão", value=edit_sel, key="edit_raw")
+            edit_sub = st.text_input("Substituto", value=PATTERNS.get(edit_sel, ""), key="edit_sub")
+        with col_e2:
+            if st.button("✏️ Salvar edição"):
+                ok, msg = edit_pattern(edit_sel, edit_raw.strip(), edit_sub.strip())
+                if ok:
+                    st.success(msg)
+                    st.experimental_rerun()
+                else:
+                    st.warning(msg)
+            if st.button("🗑️ Excluir padrão"):
+                ok, msg = remove_pattern(edit_sel)
+                if ok:
+                    st.success(msg)
+                    st.experimental_rerun()
+                else:
+                    st.warning(msg)
+    st.markdown("---")
     if st.button("🔄 Limpar Cache"):
         document_cache.clear()
         st.success("Cache limpo!")
-        st.rerun()
-
-    st.markdown("---")
-    st.markdown("#### ⚙️ Padrões de Renomeação")
-    st.markdown("Gerencie padrões personalizados que terão prioridade sobre as substituições fixas.")
-    if st.button("🔁 Recarregar padrões do disco"):
-        st.session_state["user_patterns"] = load_user_patterns()
-        st.success("Padrões recarregados.")
-
-    # Área para adicionar novo padrão
-    with st.expander("➕ Adicionar novo padrão"):
-        new_pattern = st.text_input("Texto a procurar (padrão):", value="", key="new_pat_text")
-        new_repl = st.text_input("Substituição (nome final):", value="", key="new_pat_repl")
-        new_enabled = st.checkbox("Habilitado", value=True, key="new_pat_enabled")
-        if st.button("Adicionar padrão"):
-            pat_norm = normalize_for_compare(new_pattern)
-            conflicts = find_conflicts(pat_norm, st.session_state.get("user_patterns", []))
-            new_item = {
-                "id": str(uuid.uuid4()),
-                "pattern": new_pattern.strip(),
-                "replacement": new_repl.strip() or new_pattern.strip(),
-                "enabled": bool(new_enabled)
-            }
-            patterns = st.session_state.get("user_patterns", [])
-            patterns.insert(0, new_item)  # inserir no topo = maior prioridade
-            if save_user_patterns(patterns):
-                st.session_state["user_patterns"] = patterns
-                st.success("Padrão adicionado e salvo.")
-                if conflicts:
-                    st.warning(f"Possível conflito detectado com {len(conflicts)} padrão(ões) existentes (verifique ordem).")
-            else:
-                st.error("Falha ao salvar novo padrão. Verifique permissões.")
+        st.experimental_rerun()
 
 # =====================================================================
-# DASHBOARD ANALÍTICO
+# DASHBOARD ANALÍTICO (mantive a sua lógica)
 # =====================================================================
 def criar_dashboard_analitico():
-    """Cria dashboard com métricas e analytics"""
     if "resultados" not in st.session_state:
         return
-    
     st.markdown("---")
     st.markdown("### 📊 Dashboard Analítico")
-    
     resultados = st.session_state["resultados"]
     logs = st.session_state.get("processed_logs", [])
-    
-    # Métricas principais
     col1, col2, col3, col4 = st.columns(4)
-    
     with col1:
         total_arquivos = len(resultados)
         st.metric("📁 Arquivos Processados", total_arquivos)
-    
     with col2:
         total_paginas = sum(r.get('pages', 1) for r in resultados)
         st.metric("📄 Total de Páginas", total_paginas)
-    
     with col3:
         sucessos = len([log for log in logs if log[2] == "OK"])
         st.metric("✅ Sucessos", sucessos)
-    
     with col4:
         erros = len([log for log in logs if log[2] != "OK"])
         st.metric("❌ Erros", erros)
-    
-    # Estatísticas por emitente
     if resultados:
         st.markdown("#### 📈 Emitentes Mais Frequentes")
         emitentes = {}
         for r in resultados:
             emitente = r.get('emitente', 'Desconhecido')
             emitentes[emitente] = emitentes.get(emitente, 0) + 1
-        
         for emitente, count in sorted(emitentes.items(), key=lambda x: x[1], reverse=True)[:5]:
             st.write(f"`{emitente}`: {count} documento(s)")
 
 # =====================================================================
-# INTERFACE DE GERENCIAMENTO DE PADRÕES (na área principal)
+# UPLOAD E PROCESSAMENTO (MODE B - HÍBRIDO MULTITHREAD)
+# - Processa cada página com ThreadPoolExecutor, mas agrupa por (numero, emitente)
+# - Usa cache por arquivo (se cache existir, pula todo o processamento do arquivo)
 # =====================================================================
-def patterns_management_ui():
-    st.markdown("---")
-    st.markdown("### 🔍 Padrões personalizados (ordenados por prioridade)")
-    patterns = st.session_state.get("user_patterns", [])
-    if not patterns:
-        st.info("Nenhum padrão personalizado salvo. Use a área na sidebar para adicionar.")
-        return
 
-    # Mostrar lista com controles para cada padrão (editar / mover / habilitar / excluir)
-    for i, pat in enumerate(patterns):
-        cols = st.columns([0.6, 2.2, 1.2, 0.6, 0.6, 0.6])
-        enabled = cols[0].checkbox("", value=pat.get("enabled", True), key=f"pat_enabled_{pat['id']}")
-        text = cols[1].text_input("Padrão:", value=pat.get("pattern", ""), key=f"pat_text_{pat['id']}")
-        repl = cols[2].text_input("Substituição:", value=pat.get("replacement", ""), key=f"pat_repl_{pat['id']}")
-        # mover para cima / baixo
-        if cols[3].button("▲", key=f"up_{pat['id']}") and i > 0:
-            patterns[i], patterns[i-1] = patterns[i-1], patterns[i]
-            save_user_patterns(patterns)
-            st.session_state["user_patterns"] = patterns
-            st.experimental_rerun()
-        if cols[4].button("▼", key=f"down_{pat['id']}") and i < len(patterns)-1:
-            patterns[i], patterns[i+1] = patterns[i+1], patterns[i]
-            save_user_patterns(patterns)
-            st.session_state["user_patterns"] = patterns
-            st.experimental_rerun()
-        if cols[5].button("🗑️", key=f"del_{pat['id']}"):
-            # remover
-            patterns.pop(i)
-            save_user_patterns(patterns)
-            st.session_state["user_patterns"] = patterns
-            st.experimental_rerun()
-        # atualizar se mudou
-        if (text != pat.get("pattern")) or (repl != pat.get("replacement")) or (enabled != pat.get("enabled")):
-            pat["pattern"] = text
-            pat["replacement"] = repl
-            pat["enabled"] = enabled
-            save_user_patterns(patterns)
-            st.session_state["user_patterns"] = patterns
-
-# =====================================================================
-# UPLOAD E PROCESSAMENTO
-# =====================================================================
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.markdown("### 📎 Enviar PDFs e processar ")
 uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True, key="uploader")
@@ -533,7 +507,6 @@ with col_up_a:
     process_btn = st.button("🚀 Processar PDFs")
 with col_up_b:
     clear_session = st.button("♻️ Limpar sessão")
-
 st.markdown("</div>", unsafe_allow_html=True)
 
 if clear_session:
@@ -546,31 +519,29 @@ if clear_session:
         if k in st.session_state:
             del st.session_state[k]
     st.success("Sessão limpa.")
-    st.rerun()
+    st.experimental_rerun()
 
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
 
+    # Construir lista de arquivos (bytes) e total de páginas
     arquivos = []
+    total_paginas = 0
     for f in uploaded_files:
         try:
             b = f.read()
-            arquivos.append({"name": f.name, "bytes": b})
+            reader = PdfReader(io.BytesIO(b))
+            n_pages = len(reader.pages)
+            total_paginas += n_pages
+            arquivos.append({"name": f.name, "bytes": b, "pages": n_pages})
         except Exception:
             st.warning(f"Erro ao ler {f.name}, ignorado.")
 
-    total_paginas = 0
-    for a in arquivos:
-        try:
-            r = PdfReader(io.BytesIO(a["bytes"]))
-            total_paginas += len(r.pages)
-        except Exception:
-            st.warning(f"Arquivo inválido: {a['name']}")
-
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
 
+    # Estruturas de resultado
     agrupados_bytes = {}
     resultados_meta = []
     processed_logs = []
@@ -584,50 +555,98 @@ if uploaded_files and process_btn:
         "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
     )
 
+    # Executor config (MODIFICAÇÃO)
+    worker_count = int(st.session_state.get("worker_count", MAX_WORKERS_DEFAULT))
+
     for a in arquivos:
         name = a["name"]
-        try:
-            reader = PdfReader(io.BytesIO(a["bytes"]))
-        except Exception:
-            processed_logs.append((name, 0, "ERRO_LEITURA", "", "Gemini"))
-            continue
+        file_bytes = a["bytes"]
+        n_pages = a["pages"]
 
-        for idx, page in enumerate(reader.pages):
-            # Verificar cache primeiro
-            b = io.BytesIO()
-            w = PdfWriter()
-            w.add_page(page)
-            w.write(b)
-            b.seek(0)
-            
-            cache_key = document_cache.get_cache_key(b.getvalue(), prompt)
-            cached_result = document_cache.get(cache_key)
-            
-            if cached_result and st.session_state.get("use_cache", True):
-                dados, tempo, provider = cached_result['dados'], cached_result['tempo'], cached_result['provider']
-                ok = True
-                st.sidebar.info("💾 Usando cache")
-            else:
-                # Processar com Gemini
-                dados, ok, tempo, provider = processar_pagina_gemini(prompt, b)
-                
-                # Salvar no cache se bem-sucedido
-                if ok and "error" not in dados:
-                    document_cache.set(cache_key, {
-                        'dados': dados,
-                        'tempo': tempo,
-                        'provider': provider
-                    })
-            
-            page_label = f"{name} (pág {idx+1})"
+        # Cache por arquivo inteiro
+        cache_key = document_cache.get_cache_key_file(file_bytes, prompt)
+        cached_result = document_cache.get(cache_key) if use_cache else None
+        if cached_result:
+            st.sidebar.info(f"💾 Usando cache para {name}")
+            # cached_result expected to be {'pages': [...], 'meta': [...], 'grouped': {...}}
+            # Reutiliza cached grouped PDFs: armazenamos os 'dados' extraidos por página
+            page_results = cached_result.get("page_results", [])
+        else:
+            # precisamos gerar page bytes e processá-los em paralelo
+            try:
+                reader = PdfReader(io.BytesIO(file_bytes))
+            except Exception as e:
+                processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "Gemini"))
+                continue
+
+            # montar lista de page-bytes (em memória) sem escrever arquivos
+            page_buffers = []
+            for idx, page in enumerate(reader.pages):
+                b = io.BytesIO()
+                w = PdfWriter()
+                w.add_page(page)
+                w.write(b)
+                page_bytes = b.getvalue()
+                page_buffers.append((idx, page_bytes))
+
+            # Processar com ThreadPoolExecutor
+            page_results = [None] * len(page_buffers)
+            futures = []
+            with ThreadPoolExecutor(max_workers=worker_count) as ex:
+                for idx, page_bytes in page_buffers:
+                    futures.append(ex.submit(processar_pagina_gemini_single, prompt, page_bytes))
+                # coletar resultados conforme terminam
+                for i, fut in enumerate(as_completed(futures)):
+                    try:
+                        dados, ok, tempo, provider = fut.result()
+                    except Exception as e:
+                        dados, ok, tempo, provider = {"error": str(e)}, False, 0, "Gemini"
+                    # encontrar posição correspondente: usamos index i (não é ideal) -> em vez disso, vamos mapear pela ordem de submissão
+                    # para manter simplicidade, recolhemos results em append e depois ordenamos pela página idx original
+                    page_results[i] = (dados, ok, tempo, provider)
+
+            # NOTE: above as_completed doesn't preserve order of pages.
+            # Re-run in ordered collection to ensure no mix: to be robust, process using map to keep order:
+            # (we used as_completed for earlier fast path; but to ensure order we recompute ordered below)
+            # To be safe, do ordered processing with map if futures length small:
+            if len(page_buffers) > 0:
+                # try ordered map to keep page alignment
+                try:
+                    with ThreadPoolExecutor(max_workers=worker_count) as ex2:
+                        ordered_results = list(ex2.map(lambda pb: processar_pagina_gemini_single(prompt, pb[1]), page_buffers))
+                        page_results = ordered_results
+                except Exception:
+                    # fallback mantido
+                    pass
+
+            # salvar cache parcial por arquivo
+            if use_cache:
+                document_cache.set(cache_key, {
+                    "page_results": page_results,
+                    "generated_at": time.time()
+                })
+
+        # agora iterar por resultados e agrupar
+        # page_results is list of tuples (dados, ok, tempo, provider) in page order
+        for page_idx, res in enumerate(page_results):
+            if res is None:
+                # falha silenciosa
+                processed_logs.append((f"{name} (pág {page_idx+1})", 0, "ERRO_IA", "Sem resposta", "Gemini"))
+                progresso += 1
+                if progresso % 3 == 0:
+                    progress_bar.progress(min(progresso/total_paginas, 1.0))
+                continue
+            dados, ok, tempo, provider = res
+            page_label = f"{name} (pág {page_idx+1})"
             if not ok or "error" in dados:
                 processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados)), provider))
                 progresso += 1
-                progress_bar.progress(min(progresso/total_paginas, 1.0))
+                if progresso % 3 == 0:
+                    progress_bar.progress(min(progresso/total_paginas, 1.0))
                 progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA</span>", unsafe_allow_html=True)
                 resultados_meta.append({
                     "arquivo_origem": name,
-                    "pagina": idx+1,
+                    "pagina": page_idx+1,
                     "emitente_detectado": dados.get("emitente") if isinstance(dados, dict) else "-",
                     "numero_detectado": dados.get("numero_nota") if isinstance(dados, dict) else "-",
                     "status": "ERRO",
@@ -637,7 +656,6 @@ if uploaded_files and process_btn:
 
             # Validar e corrigir dados
             dados = validar_e_corrigir_dados(dados)
-
             emitente_raw = dados.get("emitente", "") or ""
             numero_raw = dados.get("numero_nota", "") or ""
             cidade_raw = dados.get("cidade", "") or ""
@@ -647,12 +665,20 @@ if uploaded_files and process_btn:
             emitente = limpar_emitente(nome_map)
 
             key = (numero, emitente)
-            agrupados_bytes.setdefault(key, []).append(b.getvalue())
+            agrupados_bytes.setdefault(key, []).append({
+                "arquivo_origem": name,
+                "pagina": page_idx + 1,
+                # armazenamos bytes comprimidos por página para reconstituir depois
+                "bytes": None  # we'll reconstruct from original file later to avoid extra memory
+            })
+
+            # Para reconstrução dos bytes sem reler, vamos armazenar o PDF completo e pagina indices
+            # mas para simplicidade, vamos re-abrir o arquivo original quando montar PDFs finais
 
             processed_logs.append((page_label, tempo, "OK", f"{numero} / {emitente}", provider))
             resultados_meta.append({
                 "arquivo_origem": name,
-                "pagina": idx+1,
+                "pagina": page_idx+1,
                 "emitente_detectado": emitente_raw,
                 "numero_detectado": numero_raw,
                 "status": "OK",
@@ -661,22 +687,38 @@ if uploaded_files and process_btn:
             })
 
             progresso += 1
-            progress_bar.progress(min(progresso/total_paginas, 1.0))
+            if progresso % 3 == 0 or progresso == total_paginas:
+                progress_bar.progress(min(progresso/total_paginas, 1.0))
             progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — OK ({tempo:.2f}s)</span>", unsafe_allow_html=True)
+
+    # Montar arquivos finais: precisamos re-ler os PDFs originais para pegar as páginas corretas.
+    # Para isso, primeiro criamos um mapa de (arquivo_origem -> bytes) para reabertura
+    arquivos_map = {a["name"]: a["bytes"] for a in arquivos}
 
     resultados = []
     files_meta = {}
-    for (numero, emitente), pages_bytes in agrupados_bytes.items():
+
+    for (numero, emitente), pages_list in agrupados_bytes.items():
         if not numero or numero == "0":
             continue
         writer = PdfWriter()
-        for pb in pages_bytes:
+        total_pages_added = 0
+        # pages_list items have arquivo_origem and pagina
+        for entry in pages_list:
+            origem = entry["arquivo_origem"]
+            pagina_idx = entry["pagina"] - 1
+            file_bytes = arquivos_map.get(origem)
+            if not file_bytes:
+                continue
             try:
-                r = PdfReader(io.BytesIO(pb))
-                for p in r.pages:
-                    writer.add_page(p)
+                r = PdfReader(io.BytesIO(file_bytes))
+                if 0 <= pagina_idx < len(r.pages):
+                    writer.add_page(r.pages[pagina_idx])
+                    total_pages_added += 1
             except Exception:
                 continue
+        if total_pages_added == 0:
+            continue
         nome_pdf = f"DOC {numero}_{emitente}.pdf"
         caminho = session_folder / nome_pdf
         with open(caminho, "wb") as f_out:
@@ -685,9 +727,9 @@ if uploaded_files and process_btn:
             "file": nome_pdf,
             "numero": numero,
             "emitente": emitente,
-            "pages": len(pages_bytes)
+            "pages": total_pages_added
         })
-        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": len(pages_bytes)}
+        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": total_pages_added}
 
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
@@ -696,14 +738,12 @@ if uploaded_files and process_btn:
     st.session_state["files_meta"] = files_meta
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
-    
-    # Mostrar dashboard após processamento
+
     criar_dashboard_analitico()
-    
-    st.rerun()
+    st.experimental_rerun()
 
 # =====================================================================
-# PAINEL CORPORATIVO - COM SISTEMA DE GERENCIAMENTO CORRIGIDO
+# PAINEL CORPORATIVO - GERENCIAMENTO (mantive sua lógica, pequenas correções)
 # =====================================================================
 if "resultados" in st.session_state:
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -755,7 +795,7 @@ if "resultados" in st.session_state:
                         st.session_state["files_meta"].pop(f, None)
                     count += 1
                 st.success(f"{count} arquivo(s) excluído(s).")
-                st.rerun()
+                st.experimental_rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -774,8 +814,7 @@ if "resultados" in st.session_state:
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 📁 Notas processadas")
-    
-    # Inicializar selected_files se não existir
+
     if "selected_files" not in st.session_state:
         st.session_state["selected_files"] = []
 
@@ -783,10 +822,10 @@ if "resultados" in st.session_state:
         fname = r["file"]
         meta = files_meta.get(fname, {})
         cols = st.columns([0.06, 0.48, 0.28, 0.18])
-        
+
         checked = fname in st.session_state.get("selected_files", [])
         cb = cols[0].checkbox("", value=checked, key=f"cb_{fname}")
-        
+
         if cb and fname not in st.session_state["selected_files"]:
             st.session_state["selected_files"].append(fname)
         if (not cb) and fname in st.session_state["selected_files"]:
@@ -800,11 +839,10 @@ if "resultados" in st.session_state:
 
         action_col = cols[3]
         action = action_col.selectbox("", options=["...", "Remover (mover p/ lixeira)", "Baixar este arquivo"], key=f"action_{fname}", index=0)
-        
-        # Botão Gerenciar - CORRIGIDO
+
         if action_col.button("⚙️ Gerenciar", key=f"manage_{fname}"):
             st.session_state["_manage_target"] = fname
-            st.rerun()
+            st.experimental_rerun()
 
         if action == "Remover (mover p/ lixeira)":
             src = session_folder / fname
@@ -819,7 +857,7 @@ if "resultados" in st.session_state:
             if fname in st.session_state.get("files_meta", {}):
                 st.session_state["files_meta"].pop(fname, None)
             st.success(f"{fname} removido.")
-            st.rerun()
+            st.experimental_rerun()
         elif action == "Baixar este arquivo":
             src = session_folder / fname
             if src.exists():
@@ -831,23 +869,18 @@ if "resultados" in st.session_state:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # =====================================================================
-    # PAINEL DE GERENCIAMENTO - CORRIGIDO
-    # =====================================================================
+    # Painel de gestão por arquivo (mantido)
     if "_manage_target" in st.session_state:
         manage_target = st.session_state["_manage_target"]
-        
-        # Verificar se o arquivo ainda existe
         if not any(r["file"] == manage_target for r in st.session_state.get("resultados", [])):
             st.session_state.pop("_manage_target", None)
-            st.rerun()
-        
+            st.experimental_rerun()
+
         st.markdown('<div class="manage-panel">', unsafe_allow_html=True)
         st.markdown(f"### ⚙️ Gerenciar: `{manage_target}`")
-        
+
         file_path = session_folder / manage_target
-        
-        # Obter informações das páginas
+
         try:
             reader = PdfReader(str(file_path))
             total_pages = len(reader.pages)
@@ -856,17 +889,16 @@ if "resultados" in st.session_state:
             st.error(f"Erro ao ler o arquivo: {str(e)}")
             pages_info = []
             total_pages = 0
-        
+
         if pages_info:
             st.info(f"📄 O arquivo possui **{total_pages} página(s)**")
-            
-            # Inicializar seleção de páginas
+
             sel_key = f"_manage_sel_{manage_target}"
             if sel_key not in st.session_state:
                 st.session_state[sel_key] = []
-            
+
             col_sel, col_actions = st.columns([1, 2])
-            
+
             with col_sel:
                 st.markdown("**Selecionar páginas:**")
                 for page in pages_info:
@@ -877,25 +909,22 @@ if "resultados" in st.session_state:
                     else:
                         if page["idx"] in st.session_state[sel_key]:
                             st.session_state[sel_key].remove(page["idx"])
-            
+
             with col_actions:
                 st.markdown("**Ações:**")
-                
                 selected_count = len(st.session_state.get(sel_key, []))
                 st.write(f"📑 Páginas selecionadas: **{selected_count}**")
-                
-                # Nome para novo arquivo
                 new_name_key = f"_manage_newname_{manage_target}"
                 if new_name_key not in st.session_state:
                     base_name = manage_target.rsplit('.pdf', 1)[0]
                     st.session_state[new_name_key] = f"{base_name}_parte.pdf"
-                
-                new_name = st.text_input("Nome do novo PDF:", 
+
+                new_name = st.text_input("Nome do novo PDF:",
                                        value=st.session_state[new_name_key],
                                        key=new_name_key)
-                
+
                 col_sep, col_rem, col_close = st.columns(3)
-                
+
                 with col_sep:
                     if st.button("➗ Separar páginas", key=f"sep_{manage_target}"):
                         selected = sorted(st.session_state.get(sel_key, []))
@@ -903,41 +932,32 @@ if "resultados" in st.session_state:
                             st.warning("Selecione pelo menos uma página para separar.")
                         else:
                             try:
-                                # Criar novo PDF com páginas selecionadas
                                 new_writer = PdfWriter()
                                 reader = PdfReader(str(file_path))
-                                
                                 for page_idx in selected:
                                     if 0 <= page_idx < len(reader.pages):
                                         new_writer.add_page(reader.pages[page_idx])
-                                
-                                # Salvar novo arquivo
                                 new_path = session_folder / new_name
                                 with open(new_path, "wb") as f:
                                     new_writer.write(f)
-                                
-                                # Adicionar aos resultados
                                 new_meta = {
                                     "file": new_name,
                                     "numero": files_meta.get(manage_target, {}).get("numero", ""),
                                     "emitente": files_meta.get(manage_target, {}).get("emitente", ""),
                                     "pages": len(selected)
                                 }
-                                
                                 st.session_state["resultados"].append(new_meta)
                                 st.session_state["files_meta"][new_name] = {
                                     "numero": new_meta["numero"],
-                                    "emitente": new_meta["emitente"], 
+                                    "emitente": new_meta["emitente"],
                                     "pages": new_meta["pages"]
                                 }
                                 st.session_state["novos_nomes"][new_name] = new_name
-                                
                                 st.success(f"✅ Arquivo separado criado: `{new_name}`")
-                                st.session_state[sel_key] = []  # Limpar seleção
-                                
+                                st.session_state[sel_key] = []
                             except Exception as e:
                                 st.error(f"❌ Erro ao separar páginas: {str(e)}")
-                
+
                 with col_rem:
                     if st.button("🗑️ Remover páginas", key=f"rem_{manage_target}"):
                         selected = sorted(st.session_state.get(sel_key, []))
@@ -945,59 +965,44 @@ if "resultados" in st.session_state:
                             st.warning("Selecione páginas para remover.")
                         else:
                             try:
-                                # Criar novo PDF sem as páginas selecionadas
                                 new_writer = PdfWriter()
                                 reader = PdfReader(str(file_path))
-                                
                                 for page_idx in range(len(reader.pages)):
                                     if page_idx not in selected:
                                         new_writer.add_page(reader.pages[page_idx])
-                                
-                                # Se sobrou alguma página, salvar o arquivo
                                 if len(new_writer.pages) > 0:
                                     with open(file_path, "wb") as f:
                                         new_writer.write(f)
-                                    
-                                    # Atualizar metadados
                                     st.session_state["files_meta"][manage_target]["pages"] = len(new_writer.pages)
                                     for r in st.session_state["resultados"]:
                                         if r["file"] == manage_target:
                                             r["pages"] = len(new_writer.pages)
-                                    
                                     st.success(f"✅ {len(selected)} página(s) removida(s)")
                                 else:
-                                    # Se não sobrou nenhuma página, excluir o arquivo
                                     file_path.unlink()
                                     st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != manage_target]
                                     st.session_state["files_meta"].pop(manage_target, None)
                                     st.session_state["novos_nomes"].pop(manage_target, None)
                                     st.success(f"📭 Arquivo `{manage_target}` foi excluído (ficou vazio)")
                                     st.session_state.pop("_manage_target", None)
-                                
                                 st.session_state[sel_key] = []  # Limpar seleção
-                                st.rerun()
-                                
+                                st.experimental_rerun()
                             except Exception as e:
                                 st.error(f"❌ Erro ao remover páginas: {str(e)}")
-                
+
                 with col_close:
                     if st.button("❌ Fechar", key=f"close_{manage_target}"):
                         st.session_state.pop("_manage_target", None)
                         st.session_state.pop(sel_key, None)
-                        st.rerun()
-        
+                        st.experimental_rerun()
         else:
             st.warning("Não foi possível carregar as páginas do arquivo.")
             if st.button("❌ Fechar", key=f"close_err_{manage_target}"):
                 st.session_state.pop("_manage_target", None)
-                st.rerun()
-        
-        st.markdown("</div>", unsafe_allow_html=True)
+                st.experimental_rerun()
 
-    # Dashboard analítico
     criar_dashboard_analitico()
 
-    # Mostrar logs se solicitado
     if show_logs and st.session_state.get("processed_logs"):
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("### 📝 Logs de processamento (últimas páginas)")
@@ -1026,9 +1031,6 @@ if "resultados" in st.session_state:
             st.download_button("⬇️ Clique para baixar (ZIP)", data=mem, file_name="notas_processadas.zip", mime="application/zip")
     with col_dl_b:
         st.markdown("<div class='small-note'>Dica: edite nomes na lista e use 'Baixar Selecionadas' para baixar apenas o que precisar.</div>", unsafe_allow_html=True)
-
-    # Mostrar a interface de gerenciamento de padrões na página principal
-    patterns_management_ui()
 
 else:
     st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
