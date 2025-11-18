@@ -167,7 +167,7 @@ MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
 MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 
 # =====================================================================
-# NORMALIZAÇÃO E SUBSTITUIÇÕES
+# NORMALIZAÇÃO E SUBSTITUIÇÕES FIXAS
 # =====================================================================
 SUBSTITUICOES_FIXAS = {
     "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
@@ -204,6 +204,67 @@ SUBSTITUICOES_FIXAS = {
     
 }
 
+# =====================================================================
+# PERSISTÊNCIA E GERENCIAMENTO DE PADRÕES DO USUÁRIO
+# =====================================================================
+PATTERNS_DIR = Path("./config")
+PATTERNS_FILE = PATTERNS_DIR / "patterns.json"
+PATTERNS_DIR.mkdir(exist_ok=True)
+
+def load_user_patterns():
+    """Carrega padrões do arquivo (lista ordenada). Cada padrão: {id, pattern, replacement, enabled}"""
+    if PATTERNS_FILE.exists():
+        try:
+            with open(PATTERNS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # ensure ordering and fields
+                out = []
+                for item in data:
+                    if "id" not in item:
+                        item["id"] = str(uuid.uuid4())
+                    item.setdefault("pattern", "")
+                    item.setdefault("replacement", "")
+                    item.setdefault("enabled", True)
+                    out.append(item)
+                return out
+        except Exception:
+            return []
+    return []
+
+def save_user_patterns(patterns):
+    try:
+        with open(PATTERNS_FILE, "w", encoding="utf-8") as f:
+            json.dump(patterns, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        st.error(f"Erro salvando padrões: {e}")
+        return False
+
+def normalize_for_compare(s: str) -> str:
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("ASCII")
+    s = re.sub(r"[^A-Z0-9 ]+", " ", s.upper())
+    return re.sub(r"\s+", " ", s).strip()
+
+def find_conflicts(new_pattern_norm, existing_patterns):
+    """Busca conflitos simples (substring match) para alertar o usuário"""
+    conflicts = []
+    for p in existing_patterns:
+        p_norm = normalize_for_compare(p.get("pattern", ""))
+        if not p_norm:
+            continue
+        if p_norm in new_pattern_norm or new_pattern_norm in p_norm:
+            conflicts.append(p)
+    return conflicts
+
+# Carregar padrões para session_state (cache local da sessão)
+if "user_patterns" not in st.session_state:
+    st.session_state["user_patterns"] = load_user_patterns()
+
+# =====================================================================
+# NORMALIZAÇÃO E SUBSTITUIÇÕES (UTILIZADAS DURANTE PROCESSAMENTO)
+# =====================================================================
 def _normalizar_texto(s: str) -> str:
     if not s:
         return ""
@@ -212,13 +273,33 @@ def _normalizar_texto(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
+    """Aplica padrões do usuário (na ordem) e depois as substituições fixas."""
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
+
+    # Regra especial SABARA (mantida)
     if "SABARA" in nome_norm:
         return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
+
+    # Primeiro: padrões do usuário (ordenados). Só aplicar se enabled.
+    user_patterns = st.session_state.get("user_patterns", [])
+    for pat in user_patterns:
+        if not pat.get("enabled", True):
+            continue
+        pat_norm = normalize_for_compare(pat.get("pattern", ""))
+        if not pat_norm:
+            continue
+        # se o padrão (normalizado) está contido no nome normalizado -> aplicar
+        if pat_norm in nome_norm:
+            # retorno já em forma do replacement (deve ser usado como base)
+            return pat.get("replacement", pat.get("pattern", "")).strip()
+
+    # Depois: substituições fixas
     for padrao, substituto in SUBSTITUICOES_FIXAS.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
+
+    # fallback: transformar nome normalizado em formato de arquivo
     return re.sub(r"\s+", "_", nome_norm)
 
 def limpar_emitente(nome: str) -> str:
@@ -310,7 +391,7 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
     return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
 
 # =====================================================================
-# SIDEBAR CONFIGURAÇÕES
+# SIDEBAR CONFIGURAÇÕES (agora com gerenciamento de padrões)
 # =====================================================================
 with st.sidebar:
     st.markdown("### 🔧 Configurações")
@@ -323,6 +404,37 @@ with st.sidebar:
         document_cache.clear()
         st.success("Cache limpo!")
         st.rerun()
+
+    st.markdown("---")
+    st.markdown("#### ⚙️ Padrões de Renomeação")
+    st.markdown("Gerencie padrões personalizados que terão prioridade sobre as substituições fixas.")
+    if st.button("🔁 Recarregar padrões do disco"):
+        st.session_state["user_patterns"] = load_user_patterns()
+        st.success("Padrões recarregados.")
+
+    # Área para adicionar novo padrão
+    with st.expander("➕ Adicionar novo padrão"):
+        new_pattern = st.text_input("Texto a procurar (padrão):", value="", key="new_pat_text")
+        new_repl = st.text_input("Substituição (nome final):", value="", key="new_pat_repl")
+        new_enabled = st.checkbox("Habilitado", value=True, key="new_pat_enabled")
+        if st.button("Adicionar padrão"):
+            pat_norm = normalize_for_compare(new_pattern)
+            conflicts = find_conflicts(pat_norm, st.session_state.get("user_patterns", []))
+            new_item = {
+                "id": str(uuid.uuid4()),
+                "pattern": new_pattern.strip(),
+                "replacement": new_repl.strip() or new_pattern.strip(),
+                "enabled": bool(new_enabled)
+            }
+            patterns = st.session_state.get("user_patterns", [])
+            patterns.insert(0, new_item)  # inserir no topo = maior prioridade
+            if save_user_patterns(patterns):
+                st.session_state["user_patterns"] = patterns
+                st.success("Padrão adicionado e salvo.")
+                if conflicts:
+                    st.warning(f"Possível conflito detectado com {len(conflicts)} padrão(ões) existentes (verifique ordem).")
+            else:
+                st.error("Falha ao salvar novo padrão. Verifique permissões.")
 
 # =====================================================================
 # DASHBOARD ANALÍTICO
@@ -367,6 +479,48 @@ def criar_dashboard_analitico():
         
         for emitente, count in sorted(emitentes.items(), key=lambda x: x[1], reverse=True)[:5]:
             st.write(f"`{emitente}`: {count} documento(s)")
+
+# =====================================================================
+# INTERFACE DE GERENCIAMENTO DE PADRÕES (na área principal)
+# =====================================================================
+def patterns_management_ui():
+    st.markdown("---")
+    st.markdown("### 🔍 Padrões personalizados (ordenados por prioridade)")
+    patterns = st.session_state.get("user_patterns", [])
+    if not patterns:
+        st.info("Nenhum padrão personalizado salvo. Use a área na sidebar para adicionar.")
+        return
+
+    # Mostrar lista com controles para cada padrão (editar / mover / habilitar / excluir)
+    for i, pat in enumerate(patterns):
+        cols = st.columns([0.6, 2.2, 1.2, 0.6, 0.6, 0.6])
+        enabled = cols[0].checkbox("", value=pat.get("enabled", True), key=f"pat_enabled_{pat['id']}")
+        text = cols[1].text_input("Padrão:", value=pat.get("pattern", ""), key=f"pat_text_{pat['id']}")
+        repl = cols[2].text_input("Substituição:", value=pat.get("replacement", ""), key=f"pat_repl_{pat['id']}")
+        # mover para cima / baixo
+        if cols[3].button("▲", key=f"up_{pat['id']}") and i > 0:
+            patterns[i], patterns[i-1] = patterns[i-1], patterns[i]
+            save_user_patterns(patterns)
+            st.session_state["user_patterns"] = patterns
+            st.experimental_rerun()
+        if cols[4].button("▼", key=f"down_{pat['id']}") and i < len(patterns)-1:
+            patterns[i], patterns[i+1] = patterns[i+1], patterns[i]
+            save_user_patterns(patterns)
+            st.session_state["user_patterns"] = patterns
+            st.experimental_rerun()
+        if cols[5].button("🗑️", key=f"del_{pat['id']}"):
+            # remover
+            patterns.pop(i)
+            save_user_patterns(patterns)
+            st.session_state["user_patterns"] = patterns
+            st.experimental_rerun()
+        # atualizar se mudou
+        if (text != pat.get("pattern")) or (repl != pat.get("replacement")) or (enabled != pat.get("enabled")):
+            pat["pattern"] = text
+            pat["replacement"] = repl
+            pat["enabled"] = enabled
+            save_user_patterns(patterns)
+            st.session_state["user_patterns"] = patterns
 
 # =====================================================================
 # UPLOAD E PROCESSAMENTO
@@ -872,6 +1026,9 @@ if "resultados" in st.session_state:
             st.download_button("⬇️ Clique para baixar (ZIP)", data=mem, file_name="notas_processadas.zip", mime="application/zip")
     with col_dl_b:
         st.markdown("<div class='small-note'>Dica: edite nomes na lista e use 'Baixar Selecionadas' para baixar apenas o que precisar.</div>", unsafe_allow_html=True)
+
+    # Mostrar a interface de gerenciamento de padrões na página principal
+    patterns_management_ui()
 
 else:
     st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
