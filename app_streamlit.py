@@ -332,7 +332,7 @@ if not GEMINI_API_KEY:
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.0-flash-exp"))
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash-exp"))
     st.sidebar.success("✅ Gemini configurado")
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
