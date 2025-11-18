@@ -1,4 +1,3 @@
-# arquivo otimizado modo B - TURBO SEGURO (correções completas)
 import os
 import io
 import time
@@ -118,6 +117,7 @@ MAX_TOTAL_PAGES = 500
 MAX_RETRIES = 2
 MIN_RETRY_DELAY = 5
 MAX_RETRY_DELAY = 30
+
 # =====================================================================
 # SISTEMA DE CACHE INTELIGENTE
 # =====================================================================
@@ -317,6 +317,7 @@ def validar_e_corrigir_dados(dados):
         numero_limpo = re.sub(r'[^\d]', '', str(dados['numero_nota']))
         dados['numero_nota'] = numero_limpo if numero_limpo else "000000"
     return dados
+
 # =====================================================================
 # CONFIGURAÇÃO GEMINI
 # =====================================================================
@@ -502,6 +503,7 @@ def criar_dashboard_analitico():
 
         for em, qtd in sorted(emitentes.items(), key=lambda x: x[1], reverse=True)[:5]:
             st.write(f"`{em}`: {qtd} doc(s)")
+
 # =====================================================================
 # UPLOAD + PROCESSAMENTO MULTITHREAD POR PÁGINA (OPÇÃO A — TURBO)
 # =====================================================================
@@ -790,6 +792,7 @@ if uploaded_files and process_btn:
     criar_dashboard_analitico()
     time.sleep(0.15)
     st.rerun()
+
 # =====================================================================
 # PAINEL FINAL DE ARQUIVOS GERADOS
 # =====================================================================
@@ -954,11 +957,13 @@ if "session_folder" in st.session_state and "resultados" in st.session_state:
                     except Exception as e:
                         st.error(f"Erro ao separar páginas: {e}")
 
+        except Exception as e:
+            st.error(f"Erro ao separar páginas: {e}")
+
 # =====================================================================
 # BLOCO 6/6 — LOGS AVANÇADOS, EXPORT/IMPORT DE PADRÕES, LIMPEZA E FINALIZAÇÃO
 # =====================================================================
 # --- Funções utilitárias adicionais ---
-
 
 def export_patterns_to_file(dest: Path):
     try:
@@ -1023,7 +1028,7 @@ with col_l3:
             ok, msg = import_patterns_from_file(temp_import)
             if ok:
                 st.success(msg)
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error(msg)
         except Exception as e:
@@ -1062,7 +1067,7 @@ with col_f2:
                 st.session_state.pop(k, None)
             st.success("Sessão limpa — arquivos temporários removidos.")
             # não forçar rerun automático se não quiser; aqui é usuário que chamou
-            st.experimental_rerun()
+            st.rerun()
         except Exception as e:
             st.error(f"Erro ao limpar sessão: {e}")
 
@@ -1087,8 +1092,3 @@ try:
     save_patterns(PATTERNS)
 except Exception:
     pass
-
-# =====================================================================
-# FIM DO ARQUIVO — BLOCO 6/6
-# =====================================================================
-
