@@ -1,8 +1,4 @@
-# turbo_v6_1_fixed.py
-# Versão: Turbo v6.1 — Fixed
-# Correção: Erro de Attribute Error no pypdf (encadeamento de métodos removido)
-
-import os
+import os 
 import io
 import time
 import json
@@ -14,11 +10,7 @@ import re
 import hashlib
 import pickle
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# Biblioteca moderna
-from pypdf import PdfReader, PdfWriter
-
+from PyPDF2 import PdfReader, PdfWriter
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
@@ -29,119 +21,192 @@ from dotenv import load_dotenv
 # =====================================================================
 load_dotenv()
 st.set_page_config(
-    page_title="Automatizador de Notas v6.1",
-    page_icon="⚡",
-    layout="wide"
+    page_title="Automatizador de Notas Fiscais", 
+    page_icon="icone.ico"
 )
 
-st.markdown(
-    """
+# ======= CSS Corporativo Claro =======
+st.markdown("""
 <style>
-body { background-color: #f8f9fa; color: #212529; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
-[data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e9ecef; }
-h1, h2, h3, h4 { color: #0f4c81; }
-div.stButton > button { background-color: #0f4c81; color: white; border-radius: 8px; border: none; font-weight: 500; }
-div.stButton > button:hover { background-color: #0b3a5a; }
+body {
+  background-color: #f8f9fa;
+  color: #212529;
+  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
+}
+[data-testid="stSidebar"] {
+  background-color: #ffffff;
+  border-right: 1px solid #e9ecef;
+}
+h1, h2, h3, h4 {
+  color: #0f4c81;
+}
+div.stButton > button {
+  background-color: #0f4c81;
+  color: white;
+  border-radius: 8px;
+  border: none;
+  font-weight: 500;
+}
+div.stButton > button:hover {
+  background-color: #0b3a5a;
+}
+.stProgress > div > div > div > div {
+  background-color: #28a745 !important;
+}
+.success-log {
+  color: #155724;
+  background-color: #d4edda;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.warning-log {
+  color: #856404;
+  background-color: #fff3cd;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.error-log {
+  color: #721c24;
+  background-color: #f8d7da;
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.top-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.block-container {
+  padding-top: 2rem;
+}
+.small-note {
+  font-size:13px;
+  color:#6b7280;
+}
 .card { background: #fff; padding: 12px; border-radius:8px; box-shadow: 0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
-.small-note { font-size:13px; color:#6b7280; }
-.warning-box { background-color: #fff3cd; border-left: 5px solid #ffc107; padding: 10px; border-radius: 4px; color: #856404; font-size: 0.9em; margin-bottom: 15px; }
-.tool-box { background-color: #e9ecef; padding: 15px; border-radius: 8px; margin-top: 20px; border: 1px solid #dee2e6; }
+.metric-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; }
+.manage-panel { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0f4c81; margin: 10px 0; }
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
 
-st.title("Automatizador de Notas Fiscais — Turbo v6.1 (Fixed)")
+st.title("Automatizador de Notas Fiscais PDF")
 
 # =====================================================================
-# ESTRUTURAS E CONFIGURAÇÕES
-# =====================================================================
-TEMP_FOLDER = Path("./temp")
-TEMP_FOLDER.mkdir(exist_ok=True)
-
-CACHE_DIR = Path("./cache")
-CACHE_DIR.mkdir(exist_ok=True)
-
-CONFIG_DIR = Path("./config")
-CONFIG_DIR.mkdir(exist_ok=True)
-
-PATTERNS_FILE = CONFIG_DIR / "patterns.json"
-
-MAX_WORKERS_DEFAULT = 4
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
-BATCH_SIZE_DEFAULT = int(os.getenv("BATCH_SIZE", "8"))
-
-# =====================================================================
-# SISTEMA DE CACHE
+# SISTEMA DE CACHE INTELIGENTE
 # =====================================================================
 class DocumentCache:
-    def __init__(self, cache_dir=CACHE_DIR):
+    def __init__(self, cache_dir="./cache"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
-
-    def get_cache_key_file(self, file_bytes: bytes, prompt: str):
-        content_hash = hashlib.md5(file_bytes).hexdigest()
+    
+    def get_cache_key(self, pdf_bytes, prompt):
+        """Gera chave única baseada no conteúdo do PDF e prompt"""
+        content_hash = hashlib.md5(pdf_bytes).hexdigest()
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
         return f"{content_hash}_{prompt_hash}"
-
+    
     def get(self, key):
-        f = self.cache_dir / f"{key}.pkl"
-        if f.exists():
+        cache_file = self.cache_dir / f"{key}.pkl"
+        if cache_file.exists():
             try:
-                with open(f, "rb") as h: return pickle.load(h)
-            except: return None
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
+            except:
+                return None
         return None
-
+    
     def set(self, key, data):
+        cache_file = self.cache_dir / f"{key}.pkl"
         try:
-            with open(self.cache_dir / f"{key}.pkl", "wb") as h: pickle.dump(data, h)
-        except: pass
-
+            with open(cache_file, 'wb') as f:
+                pickle.dump(data, f)
+        except:
+            pass
+    
     def clear(self):
-        for f in self.cache_dir.glob("*.pkl"):
-            try: f.unlink()
-            except: pass
+        """Limpa todo o cache"""
+        for cache_file in self.cache_dir.glob("*.pkl"):
+            try:
+                cache_file.unlink()
+            except:
+                pass
 
 document_cache = DocumentCache()
 
 # =====================================================================
-# GERENCIAMENTO DE PADRÕES
+# CONFIGURAÇÃO GEMINI
 # =====================================================================
-def load_patterns():
-    if not PATTERNS_FILE.exists():
-        default = {"COMPANHIA DE AGUA": "CAGEPA", "PETROLEO BRASILEIRO": "PETROBRAS"}
-        save_patterns(default)
-        return default
-    try:
-        with open(PATTERNS_FILE, "r", encoding="utf-8") as f: return json.load(f)
-    except: return {}
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GEMINI_API_KEY:
+    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
+    st.stop()
 
-def save_patterns(pats: dict):
-    try:
-        with open(PATTERNS_FILE, "w", encoding="utf-8") as f: json.dump(pats, f, indent=2, ensure_ascii=False)
-    except: pass
-
-PATTERNS = load_patterns()
-
-def add_pattern(raw, sub):
-    raw, sub = raw.strip(), sub.strip()
-    if not raw or not sub: return False
-    PATTERNS[raw] = sub
-    save_patterns(PATTERNS)
-    return True
-
-def remove_pattern(raw):
-    if raw in PATTERNS:
-        PATTERNS.pop(raw)
-        save_patterns(PATTERNS)
-        return True
-    return False
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
+    st.sidebar.success("✅ Gemini configurado")
+except Exception as e:
+    st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
+    st.stop()
 
 # =====================================================================
-# FUNÇÕES AUXILIARES
+# CONFIGURAÇÕES GERAIS
 # =====================================================================
+PRIMARY = "#0f4c81"
+ACCENT = "#6fb3b8"
+BG = "#F7FAFC"
+CARD_BG = "#FFFFFF"
+TEXT_MUTED = "#6b7280"
+
+TEMP_FOLDER = Path("./temp")
+os.makedirs(TEMP_FOLDER, exist_ok=True)
+
+MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
+MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
+
+# =====================================================================
+# NORMALIZAÇÃO E SUBSTITUIÇÕES
+# =====================================================================
+SUBSTITUICOES_FIXAS = {
+    "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
+    "COMPANHIA DE AGUA E ESGOTOS DA PARAÍBA": "CAGEPA",
+    "COMPANHIA DE AGUA E ESGOTO DA PARAIBA": "CAGEPA",
+    "CIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
+    "COMPANHIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
+    "CAGECE": "CAGECE",
+    "TRANSPORTE LIDA": "TRANSPORTE_LIDA",
+    "TRANSPORTE LIDA LTDA": "TRANSPORTE_LIDA",
+    "TRANSPORTELIDA": "TRANSPORTE_LIDA",
+    "UNIPAR CARBOCLORO": "UNIPAR_CARBOCLORO",
+    "UNIPAR CARBOCLORO LTDA": "UNIPAR_CARBOCLORO",
+    "UNIPAR_CARBLOCLORO LTDA": "UNIPAR_CARBOCLORO",
+    "EXPRESS TCM": "EXPRESS_TCM",
+    "EXPRESS TCM LTDA": "EXPRESS_TCM",
+    "MDM RENOVADORA DE PNEUS LTDA ME": "MDM_RENOVADORA", 
+    "MDM RENOVADORA DE PNEUS": "MDM_RENOVADORA",
+    "COMPANHIA DE AGUAS E ESGOTOS DO RN": "CAERN",
+    "EKIPE TEC DE SEG E INCENDIO LTDA ME": "EKIPE",
+    "PETRÓLEO BRASILEIRO S.A": "PETROBRAS",
+    "PETROLEO BRASILEIRO S.A": "PETROBRAS",
+    "PETRÓLEO BRASILEIRO S A": "PETROBRAS",
+    "PETROLEO BRASILEIRO S A": "PETROBRAS",
+    "INNOVATIVE WATER CARE IND E COM DE PROD QUIM BRASIL LTDA": "SIGURA",
+    "COMERCIAL E IMPORTADORA DE PNEUS": "CAMPNEUS",
+    "EKIPE TEC DE SEG E INCENDIO LTDA ME": "EKIPE",
+    "URP CARGAS E LOGISTICA LTDA": "URP",
+    "U.R.P CARGAS & LOGISTICA LTDA": "URP",
+    "U.R.P CARGAS E LOGISTICA LTDA": "URP",
+    "MF DE MELO FILHO-ME": "MF_DE_MELO",
+    "M.F DE MELO FILHO": "MF_DE_MELO",
+    "M.F DE MELO FILHO-ME": "MF_DE_MELO",
+    
+}
+
 def _normalizar_texto(s: str) -> str:
-    if not s: return ""
+    if not s:
+        return ""
     s = unicodedata.normalize("NFKD", s).encode("ASCII", "ignore").decode("ASCII")
     s = re.sub(r"[^A-Z0-9 ]+", " ", s.upper())
     return re.sub(r"\s+", " ", s).strip()
@@ -149,385 +214,665 @@ def _normalizar_texto(s: str) -> str:
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
-    if "SABARA" in nome_norm: return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
-    for padrao in sorted(PATTERNS.keys(), key=len, reverse=True):
-        if _normalizar_texto(padrao) in nome_norm: return PATTERNS[padrao]
+    if "SABARA" in nome_norm:
+        return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
+    for padrao, substituto in SUBSTITUICOES_FIXAS.items():
+        if _normalizar_texto(padrao) in nome_norm:
+            return substituto
     return re.sub(r"\s+", "_", nome_norm)
 
 def limpar_emitente(nome: str) -> str:
-    if not nome: return "SEM_NOME"
+    if not nome:
+        return "SEM_NOME"
+    nome = unicodedata.normalize("NFKD", nome).encode("ASCII", "ignore").decode("ASCII")
     nome = re.sub(r"[^A-Z0-9_]+", "_", nome.upper())
     return re.sub(r"_+", "_", nome).strip("_")
 
 def limpar_numero(numero: str) -> str:
-    if not numero: return "0"
-    n = re.sub(r"[^\d]", "", str(numero))
-    return n.lstrip("0") or "0"
+    if not numero:
+        return "0"
+    numero = re.sub(r"[^\d]", "", str(numero))
+    return numero.lstrip("0") or "0"
 
-def extrair_json_seguro(texto: str):
-    if not texto: return []
-    texto = texto.strip()
-    # 1. Array
-    m_arr = re.search(r'\[.*\]', texto, re.DOTALL)
-    if m_arr:
-        try: return json.loads(m_arr.group())
-        except: pass
-    # 2. Object
-    m_obj = re.search(r'\{.*\}', texto, re.DOTALL)
-    if m_obj:
-        try: return [json.loads(m_obj.group())]
-        except: pass
-    # 3. Fallback
-    clean = texto.replace("```json", "").replace("```", "").strip()
-    try:
-        res = json.loads(clean)
-        return [res] if isinstance(res, dict) else res
-    except: return []
-
-# =====================================================================
-# CONFIG GEMINI
-# =====================================================================
-if hasattr(st, "secrets") and st.secrets.get("GOOGLE_API_KEY"):
-    GEMINI_API_KEY = st.secrets["GOOGLE_API_KEY"]
-else:
-    GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
-
-if not GEMINI_API_KEY:
-    st.error("❌ Configure a GOOGLE_API_KEY.")
-    st.stop()
-
-try:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("models/gemini-1.5-flash")
-except Exception as e:
-    st.error(f"Erro API: {e}")
-    st.stop()
-
-# =====================================================================
-# WORKER (PROCESSAMENTO) - CORRIGIDO AQUI
-# =====================================================================
-def processar_arquivo_worker(arquivo_dados, use_cache, batch_size=BATCH_SIZE_DEFAULT):
-    fname = arquivo_dados["name"]
-    file_bytes = arquivo_dados["bytes"]
-    logs = []
+def validar_e_corrigir_dados(dados):
+    """Valida e corrige dados extraídos da IA"""
+    if not isinstance(dados, dict):
+        dados = {}
     
-    try:
-        reader = PdfReader(io.BytesIO(file_bytes))
-        num_pages = len(reader.pages)
-    except Exception as e:
-        return {"error": f"PDF Corrompido: {e}", "name": fname, "results": [], "bytes_originais": file_bytes, "logs": []}
-
-    prompt = (
-        "Extraia para cada página: pagina (numero), emitente, numero_nota, cidade. "
-        "Retorne JSON ARRAY: [{\"pagina\": 1, \"emitente\": \"...\", \"numero_nota\": \"...\", \"cidade\": \"...\"}, ...]"
-    )
-
-    cache_key = document_cache.get_cache_key_file(file_bytes, prompt)
-    if use_cache:
-        cached = document_cache.get(cache_key)
-        if cached: return {"name": fname, "results": cached, "bytes_originais": file_bytes, "cached": True, "logs": ["Cache Hit"]}
-
-    page_results = [None] * num_pages
-    curr = 0
+    required_fields = ['emitente', 'numero_nota', 'cidade']
     
-    while curr < num_pages:
-        end = min(curr + batch_size, num_pages)
-        batch_imgs = []
-        idxs = []
-        
-        # --- CORREÇÃO DO ERRO DO PYPDF ---
-        for i in range(curr, end):
-            if i < len(reader.pages):
-                try:
-                    buf = io.BytesIO()
-                    temp_writer = PdfWriter()
-                    temp_writer.add_page(reader.pages[i])
-                    temp_writer.write(buf)
-                    batch_imgs.append({"mime_type": "application/pdf", "data": buf.getvalue()})
-                    idxs.append(i)
-                except Exception as e:
-                    logs.append(f"Erro ao ler página {i+1}: {e}")
-        # ---------------------------------
+    # Verifica campos obrigatórios
+    for field in required_fields:
+        if field not in dados or not dados[field]:
+            dados[field] = "NÃO_IDENTIFICADO"
+    
+    # Correções comuns
+    correcoes = {
+        'emitente': {
+            'CPFL ENERGIA': 'CPFL',
+            'COMPANHIA PAULISTA DE FORCA E LUZ': 'CPFL',
+            'SABARA': 'SABARA'
+        }
+    }
+    
+    for field, correcoes_field in correcoes.items():
+        if field in dados:
+            for incorreto, correto in correcoes_field.items():
+                if incorreto in dados[field].upper():
+                    dados[field] = correto
+                    break
+    
+    # Validação de número da nota
+    if 'numero_nota' in dados:
+        numero_limpo = re.sub(r'[^\d]', '', str(dados['numero_nota']))
+        dados['numero_nota'] = numero_limpo if numero_limpo else "000000"
+    
+    return dados
 
-        if not batch_imgs:
-            curr += batch_size
-            continue
+# =====================================================================
+# PROCESSAMENTO GEMINI (SIMPLIFICADO)
+# =====================================================================
+def calcular_delay(tentativa, error_msg):
+    if "retry in" in error_msg.lower():
+        try:
+            return min(float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2, MAX_RETRY_DELAY)
+        except:
+            pass
+    return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
-        # Call API
-        extracted = []
-        for attempt in range(MAX_RETRIES + 1):
+def processar_pagina_gemini(prompt_instrucao, page_stream):
+    """Processa uma página PDF com Gemini com retry"""
+    for tentativa in range(MAX_RETRIES + 1):
+        try:
+            start = time.time()
+            resp = model.generate_content(
+                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
+                generation_config={"response_mime_type": "application/json"},
+                request_options={'timeout': 60}
+            )
+            tempo = round(time.time() - start, 2)
+            texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
             try:
-                resp = model.generate_content([prompt] + batch_imgs, generation_config={"response_mime_type": "application/json"})
-                extracted = extrair_json_seguro(resp.text)
-                break
+                dados = json.loads(texto)
             except Exception as e:
-                time.sleep(2 * (attempt + 1))
-        
-        # Map results
-        if extracted:
-            # Tenta mapear por numero de pagina
-            for item in extracted:
-                if isinstance(item, dict) and "pagina" in item:
-                    try:
-                        pg_real = int(item["pagina"]) - 1
-                        if pg_real in idxs: page_results[pg_real] = item
-                    except: pass
-            
-            # Fallback: mapear por ordem se falhou
-            for i, val in enumerate(extracted):
-                if i < len(idxs) and page_results[idxs[i]] is None:
-                    page_results[idxs[i]] = val
-        
-        curr += batch_size
-
-    if use_cache: document_cache.set(cache_key, page_results)
-    return {"name": fname, "results": page_results, "bytes_originais": file_bytes, "cached": False, "logs": logs}
+                dados = {"error": f"Resposta não era JSON válido: {str(e)}", "_raw": texto[:200]}
+            return dados, True, tempo, "Gemini"
+        except ResourceExhausted as e:
+            delay = calcular_delay(tentativa, str(e))
+            st.sidebar.warning(f"⚠️ Quota excedida (tentativa {tentativa + 1}/{MAX_RETRIES}). Aguardando {delay}s...")
+            time.sleep(delay)
+        except Exception as e:
+            if tentativa < MAX_RETRIES:
+                st.sidebar.warning(f"⚠️ Erro Gemini (tentativa {tentativa + 1}/{MAX_RETRIES}): {str(e)}")
+                time.sleep(MIN_RETRY_DELAY)
+            else:
+                return {"error": str(e)}, False, 0, "Gemini"
+    return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
 
 # =====================================================================
-# SIDEBAR
+# SIDEBAR CONFIGURAÇÕES
 # =====================================================================
 with st.sidebar:
-    st.header("⚙️ Configuração")
-    use_cache = st.checkbox("Usar Cache", value=True)
-    workers = st.slider("Workers", 1, 8, MAX_WORKERS_DEFAULT)
+    st.markdown("### 🔧 Configurações")
     
-    st.markdown("---")
-    st.subheader("📝 Padrões")
-    new_k = st.text_input("Texto Original")
-    new_v = st.text_input("Novo Nome")
-    if st.button("➕ Add Padrão"):
-        add_pattern(new_k, new_v)
-        st.rerun()
+    # Configuração de cache
+    st.markdown("#### Otimizações")
+    use_cache = st.checkbox("Usar Cache", value=True, key="use_cache")
     
-    with st.expander("Ver Padrões"):
-        for k,v in PATTERNS.items():
-            if st.button(f"🗑️ {k} -> {v}", key=k):
-                remove_pattern(k)
-                st.rerun()
-    
-    if st.button("Limpar Cache"):
+    if st.button("🔄 Limpar Cache"):
         document_cache.clear()
+        st.success("Cache limpo!")
+        st.rerun()
 
 # =====================================================================
-# APP PRINCIPAL
+# DASHBOARD ANALÍTICO
 # =====================================================================
-st.markdown('<div class="warning-box">⚠️ Modo Nuvem: Exporte seus padrões antes de sair.</div>', unsafe_allow_html=True)
-
-uploaded_files = st.file_uploader("Selecione PDFs para processar", type=["pdf"], accept_multiple_files=True)
-
-col1, col2 = st.columns([1, 4])
-if col1.button("🚀 Processar", type="primary") and uploaded_files:
-    session_path = TEMP_FOLDER / str(uuid.uuid4())
-    session_path.mkdir(exist_ok=True)
-    st.session_state["session_path"] = str(session_path)
+def criar_dashboard_analitico():
+    """Cria dashboard com métricas e analytics"""
+    if "resultados" not in st.session_state:
+        return
     
-    files_data = [{"name": f.name, "bytes": f.read()} for f in uploaded_files]
-    prog = st.progress(0)
-    status = st.empty()
+    st.markdown("---")
+    st.markdown("### 📊 Dashboard Analítico")
     
-    all_results = {}
-    logs = []
+    resultados = st.session_state["resultados"]
+    logs = st.session_state.get("processed_logs", [])
     
-    with ThreadPoolExecutor(max_workers=workers) as exc:
-        futures = {exc.submit(processar_arquivo_worker, f, use_cache): f["name"] for f in files_data}
-        done = 0
-        for fut in as_completed(futures):
-            try:
-                res = fut.result()
-                done += 1
-                prog.progress(done / len(files_data))
-                
-                if "error" in res:
-                    logs.append(f"❌ {res['name']}: {res['error']}")
-                    continue
-                    
-                # Agrupamento
-                reader = PdfReader(io.BytesIO(res["bytes_originais"]))
-                for i, page_data in enumerate(res["results"]):
-                    if not page_data: continue
-                    
-                    emit = limpar_emitente(substituir_nome_emitente(page_data.get("emitente", ""), page_data.get("cidade", "")))
-                    num = limpar_numero(page_data.get("numero_nota", ""))
-                    
-                    if num == "0": continue
-                    
-                    key = (num, emit)
-                    if key not in all_results: all_results[key] = []
-                    
-                    # Extração segura da página para o resultado final
-                    buf = io.BytesIO()
-                    w = PdfWriter()
-                    w.add_page(reader.pages[i])
-                    w.write(buf)
-                    all_results[key].append({"data": buf.getvalue(), "origem": res["name"]})
-            except Exception as e:
-                logs.append(f"Erro fatal no arquivo: {e}")
-
-    # Gerar Finais
-    final_meta = []
-    for (num, emit), pages in all_results.items():
-        w_final = PdfWriter()
-        for p in pages:
-            w_final.add_page(PdfReader(io.BytesIO(p["data"])).pages[0])
-            
-        fname = f"DOC {num}_{emit}.pdf"
-        path = session_path / fname
-        c = 2
-        while path.exists():
-            path = session_path / f"DOC {num}_{emit}_{c}.pdf"
-            c += 1
-            
-        with open(path, "wb") as f: w_final.write(f)
+    # Métricas principais
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        total_arquivos = len(resultados)
+        st.metric("📁 Arquivos Processados", total_arquivos)
+    
+    with col2:
+        total_paginas = sum(r.get('pages', 1) for r in resultados)
+        st.metric("📄 Total de Páginas", total_paginas)
+    
+    with col3:
+        sucessos = len([log for log in logs if log[2] == "OK"])
+        st.metric("✅ Sucessos", sucessos)
+    
+    with col4:
+        erros = len([log for log in logs if log[2] != "OK"])
+        st.metric("❌ Erros", erros)
+    
+    # Estatísticas por emitente
+    if resultados:
+        st.markdown("#### 📈 Emitentes Mais Frequentes")
+        emitentes = {}
+        for r in resultados:
+            emitente = r.get('emitente', 'Desconhecido')
+            emitentes[emitente] = emitentes.get(emitente, 0) + 1
         
-        final_meta.append({
-            "file_name": path.name,
-            "path": str(path),
-            "pages": len(pages),
-            "origem": list(set(p["origem"] for p in pages))
+        for emitente, count in sorted(emitentes.items(), key=lambda x: x[1], reverse=True)[:5]:
+            st.write(f"`{emitente}`: {count} documento(s)")
+
+# =====================================================================
+# UPLOAD E PROCESSAMENTO
+# =====================================================================
+st.markdown('<div class="card">', unsafe_allow_html=True)
+st.markdown("### 📎 Enviar PDFs e processar ")
+uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True, key="uploader")
+col_up_a, col_up_b = st.columns([1,1])
+with col_up_a:
+    process_btn = st.button("🚀 Processar PDFs")
+with col_up_b:
+    clear_session = st.button("♻️ Limpar sessão")
+
+st.markdown("</div>", unsafe_allow_html=True)
+
+if clear_session:
+    if "session_folder" in st.session_state:
+        try:
+            shutil.rmtree(st.session_state["session_folder"])
+        except Exception:
+            pass
+    for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
+        if k in st.session_state:
+            del st.session_state[k]
+    st.success("Sessão limpa.")
+    st.rerun()
+
+if uploaded_files and process_btn:
+    session_id = str(uuid.uuid4())
+    session_folder = TEMP_FOLDER / session_id
+    os.makedirs(session_folder, exist_ok=True)
+
+    arquivos = []
+    for f in uploaded_files:
+        try:
+            b = f.read()
+            arquivos.append({"name": f.name, "bytes": b})
+        except Exception:
+            st.warning(f"Erro ao ler {f.name}, ignorado.")
+
+    total_paginas = 0
+    for a in arquivos:
+        try:
+            r = PdfReader(io.BytesIO(a["bytes"]))
+            total_paginas += len(r.pages)
+        except Exception:
+            st.warning(f"Arquivo inválido: {a['name']}")
+
+    st.info(f"📄 Total de páginas a processar: {total_paginas}")
+
+    agrupados_bytes = {}
+    resultados_meta = []
+    processed_logs = []
+    progresso = 0
+    progress_bar = st.progress(0.0)
+    progresso_text = st.empty()
+    start_all = time.time()
+
+    prompt = (
+        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
+        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+    )
+
+    for a in arquivos:
+        name = a["name"]
+        try:
+            reader = PdfReader(io.BytesIO(a["bytes"]))
+        except Exception:
+            processed_logs.append((name, 0, "ERRO_LEITURA", "", "Gemini"))
+            continue
+
+        for idx, page in enumerate(reader.pages):
+            # Verificar cache primeiro
+            b = io.BytesIO()
+            w = PdfWriter()
+            w.add_page(page)
+            w.write(b)
+            b.seek(0)
+            
+            cache_key = document_cache.get_cache_key(b.getvalue(), prompt)
+            cached_result = document_cache.get(cache_key)
+            
+            if cached_result and st.session_state.get("use_cache", True):
+                dados, tempo, provider = cached_result['dados'], cached_result['tempo'], cached_result['provider']
+                ok = True
+                st.sidebar.info("💾 Usando cache")
+            else:
+                # Processar com Gemini
+                dados, ok, tempo, provider = processar_pagina_gemini(prompt, b)
+                
+                # Salvar no cache se bem-sucedido
+                if ok and "error" not in dados:
+                    document_cache.set(cache_key, {
+                        'dados': dados,
+                        'tempo': tempo,
+                        'provider': provider
+                    })
+            
+            page_label = f"{name} (pág {idx+1})"
+            if not ok or "error" in dados:
+                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados)), provider))
+                progresso += 1
+                progress_bar.progress(min(progresso/total_paginas, 1.0))
+                progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA</span>", unsafe_allow_html=True)
+                resultados_meta.append({
+                    "arquivo_origem": name,
+                    "pagina": idx+1,
+                    "emitente_detectado": dados.get("emitente") if isinstance(dados, dict) else "-",
+                    "numero_detectado": dados.get("numero_nota") if isinstance(dados, dict) else "-",
+                    "status": "ERRO",
+                    "provider": provider
+                })
+                continue
+
+            # Validar e corrigir dados
+            dados = validar_e_corrigir_dados(dados)
+
+            emitente_raw = dados.get("emitente", "") or ""
+            numero_raw = dados.get("numero_nota", "") or ""
+            cidade_raw = dados.get("cidade", "") or ""
+
+            numero = limpar_numero(numero_raw)
+            nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
+            emitente = limpar_emitente(nome_map)
+
+            key = (numero, emitente)
+            agrupados_bytes.setdefault(key, []).append(b.getvalue())
+
+            processed_logs.append((page_label, tempo, "OK", f"{numero} / {emitente}", provider))
+            resultados_meta.append({
+                "arquivo_origem": name,
+                "pagina": idx+1,
+                "emitente_detectado": emitente_raw,
+                "numero_detectado": numero_raw,
+                "status": "OK",
+                "tempo_s": round(tempo, 2),
+                "provider": provider
+            })
+
+            progresso += 1
+            progress_bar.progress(min(progresso/total_paginas, 1.0))
+            progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — OK ({tempo:.2f}s)</span>", unsafe_allow_html=True)
+
+    resultados = []
+    files_meta = {}
+    for (numero, emitente), pages_bytes in agrupados_bytes.items():
+        if not numero or numero == "0":
+            continue
+        writer = PdfWriter()
+        for pb in pages_bytes:
+            try:
+                r = PdfReader(io.BytesIO(pb))
+                for p in r.pages:
+                    writer.add_page(p)
+            except Exception:
+                continue
+        nome_pdf = f"DOC {numero}_{emitente}.pdf"
+        caminho = session_folder / nome_pdf
+        with open(caminho, "wb") as f_out:
+            writer.write(f_out)
+        resultados.append({
+            "file": nome_pdf,
+            "numero": numero,
+            "emitente": emitente,
+            "pages": len(pages_bytes)
         })
-        
-    st.session_state["final_results"] = final_meta
-    st.session_state["logs"] = logs
-    st.success("Processamento concluído!")
-    st.rerun()
+        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": len(pages_bytes)}
 
-if col2.button("♻️ Limpar Tudo"):
-    st.session_state.clear()
+    st.session_state["resultados"] = resultados
+    st.session_state["session_folder"] = str(session_folder)
+    st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
+    st.session_state["processed_logs"] = processed_logs
+    st.session_state["files_meta"] = files_meta
+
+    st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
+    
+    # Mostrar dashboard após processamento
+    criar_dashboard_analitico()
+    
     st.rerun()
 
 # =====================================================================
-# ÁREA DE RESULTADOS & EDIÇÃO
+# PAINEL CORPORATIVO - COM SISTEMA DE GERENCIAMENTO CORRIGIDO
 # =====================================================================
-if "final_results" in st.session_state:
-    st.markdown("---")
-    st.header("📂 Arquivos Gerados")
-    
-    results = st.session_state["final_results"]
-    
-    # --- LISTA PRINCIPAL ---
-    for i, item in enumerate(results):
-        p = Path(item["path"])
-        if not p.exists(): continue
-        
-        with st.container():
-            col_a, col_b, col_c = st.columns([3, 2, 1])
-            with col_a:
-                st.markdown(f"**📄 {item['file_name']}** <span style='color:gray;font-size:0.8em'>({item['pages']} pág)</span>", unsafe_allow_html=True)
-            with col_b:
-                new_n = st.text_input("Renomear", item["file_name"], key=f"rn_{i}", label_visibility="collapsed")
-                if new_n != item["file_name"]:
-                    if st.button("Salvar Nome", key=f"btn_rn_{i}"):
-                        new_p = p.parent / new_n if new_n.endswith(".pdf") else p.parent / f"{new_n}.pdf"
-                        p.rename(new_p)
-                        item["path"] = str(new_p)
-                        item["file_name"] = new_p.name
-                        st.rerun()
-            with col_c:
-                with open(p, "rb") as f:
-                    st.download_button("⬇️", f, file_name=item["file_name"], key=f"dl_{i}")
+if "resultados" in st.session_state:
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### Gerenciamento — selecione e aplique ações")
+    resultados = st.session_state["resultados"]
+    session_folder = Path(st.session_state["session_folder"])
+    novos_nomes = st.session_state.get("novos_nomes", {r["file"]: r["file"] for r in resultados})
+    files_meta = st.session_state.get("files_meta", {})
 
-    # =================================================================
-    # 🛠️ FERRAMENTAS DE EDIÇÃO (PÓS-PROCESSAMENTO)
-    # =================================================================
-    st.markdown("---")
-    st.markdown("### 🛠️ Ferramentas de Edição (Nos arquivos acima)")
+    col1, col2, col3, col4 = st.columns([3,2,2,2])
+    with col1:
+        q = st.text_input("🔎 Buscar arquivo ou emitente", value="", placeholder="parte do nome, emitente ou número")
+    with col2:
+        sort_by = st.selectbox("Ordenar por", ["Nome (A-Z)", "Nome (Z-A)", "Número (asc)", "Número (desc)"], index=0)
+    with col3:
+        show_logs = st.checkbox("Mostrar logs detalhados", value=False)
+    with col4:
+        if st.button("⬇️ Baixar Selecionadas"):
+            sel = st.session_state.get("selected_files", [])
+            if not sel:
+                st.warning("Nenhuma nota selecionada para download.")
+            else:
+                mem = io.BytesIO()
+                with zipfile.ZipFile(mem, "w") as zf:
+                    for f in sel:
+                        src = session_folder / f
+                        if src.exists():
+                            arcname = novos_nomes.get(f, f)
+                            zf.write(src, arcname=arcname)
+                mem.seek(0)
+                st.download_button("⬇️ Clique novamente para confirmar download", data=mem, file_name="selecionadas.zip", mime="application/zip")
+        if st.button("🗑️ Excluir Selecionadas"):
+            sel = st.session_state.get("selected_files", [])
+            if not sel:
+                st.warning("Nenhuma nota selecionada para exclusão.")
+            else:
+                count = 0
+                for f in sel:
+                    src = session_folder / f
+                    try:
+                        if src.exists():
+                            src.unlink()
+                    except Exception:
+                        pass
+                    st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != f]
+                    if f in st.session_state.get("novos_nomes", {}):
+                        st.session_state["novos_nomes"].pop(f, None)
+                    if f in st.session_state.get("files_meta", {}):
+                        st.session_state["files_meta"].pop(f, None)
+                    count += 1
+                st.success(f"{count} arquivo(s) excluído(s).")
+                st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    visible = resultados.copy()
+    if q:
+        q_up = q.strip().upper()
+        visible = [r for r in visible if q_up in r["file"].upper() or q_up in r["emitente"].upper() or q_up in r["numero"]]
+    if sort_by == "Nome (A-Z)":
+        visible.sort(key=lambda x: x["file"])
+    elif sort_by == "Nome (Z-A)":
+        visible.sort(key=lambda x: x["file"], reverse=True)
+    elif sort_by == "Número (asc)":
+        visible.sort(key=lambda x: int(x["numero"]) if x["numero"].isdigit() else 0)
+    else:
+        visible.sort(key=lambda x: int(x["numero"]) if x["numero"].isdigit() else 0, reverse=True)
+
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### 📁 Notas processadas")
     
-    # Opções disponíveis (apenas nomes atuais)
-    opcoes_arquivos = {res["file_name"]: res for res in results if Path(res["path"]).exists()}
-    lista_nomes = list(opcoes_arquivos.keys())
+    # Inicializar selected_files se não existir
+    if "selected_files" not in st.session_state:
+        st.session_state["selected_files"] = []
 
-    c_split, c_merge = st.columns(2)
+    for r in visible:
+        fname = r["file"]
+        meta = files_meta.get(fname, {})
+        cols = st.columns([0.06, 0.48, 0.28, 0.18])
+        
+        checked = fname in st.session_state.get("selected_files", [])
+        cb = cols[0].checkbox("", value=checked, key=f"cb_{fname}")
+        
+        if cb and fname not in st.session_state["selected_files"]:
+            st.session_state["selected_files"].append(fname)
+        if (not cb) and fname in st.session_state["selected_files"]:
+            st.session_state["selected_files"].remove(fname)
 
-    # --- FERRAMENTA 1: SPLIT (SEPARAR) ---
-    with c_split:
-        st.markdown('<div class="tool-box"><h5>✂️ Separar Páginas</h5>', unsafe_allow_html=True)
+        novos_nomes[fname] = cols[1].text_input(label=fname, value=novos_nomes.get(fname, fname), key=f"rename_input_{fname}")
+
+        emit = meta.get("emitente", r.get("emitente", "-"))
+        num = meta.get("numero", r.get("numero", "-"))
+        cols[2].markdown(f"<div class='small-note'>{emit}  •  Nº {num}  •  {r.get('pages',1)} pág(s)</div>", unsafe_allow_html=True)
+
+        action_col = cols[3]
+        action = action_col.selectbox("", options=["...", "Remover (mover p/ lixeira)", "Baixar este arquivo"], key=f"action_{fname}", index=0)
         
-        sel_split = st.selectbox("Escolha o arquivo:", [""] + lista_nomes, key="sel_split")
-        paginas_str = st.text_input("Páginas (ex: 1, 3-5):", key="pg_split")
-        
-        if st.button("Separar PDF", key="btn_split") and sel_split and paginas_str:
+        # Botão Gerenciar - CORRIGIDO
+        if action_col.button("⚙️ Gerenciar", key=f"manage_{fname}"):
+            st.session_state["_manage_target"] = fname
+            st.rerun()
+
+        if action == "Remover (mover p/ lixeira)":
+            src = session_folder / fname
             try:
-                # Pega o caminho real do arquivo selecionado
-                caminho_origem = opcoes_arquivos[sel_split]["path"]
-                reader = PdfReader(caminho_origem)
-                total_pg = len(reader.pages)
-                
-                writer = PdfWriter()
-                added = 0
-                
-                # Parse das páginas
-                for parte in paginas_str.split(","):
-                    parte = parte.strip()
-                    if "-" in parte:
-                        inicio, fim = map(int, parte.split("-"))
-                        for p in range(inicio, fim + 1):
-                            if 1 <= p <= total_pg:
-                                writer.add_page(reader.pages[p-1])
-                                added += 1
+                if src.exists():
+                    src.unlink()
+            except Exception:
+                pass
+            st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != fname]
+            if fname in st.session_state.get("novos_nomes", {}):
+                st.session_state["novos_nomes"].pop(fname, None)
+            if fname in st.session_state.get("files_meta", {}):
+                st.session_state["files_meta"].pop(fname, None)
+            st.success(f"{fname} removido.")
+            st.rerun()
+        elif action == "Baixar este arquivo":
+            src = session_folder / fname
+            if src.exists():
+                with open(src, "rb") as ff:
+                    data = ff.read()
+                st.download_button(f"⬇️ Baixar {fname}", data=data, file_name=novos_nomes.get(fname, fname), mime="application/pdf")
+            else:
+                st.warning("Arquivo não encontrado.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # =====================================================================
+    # PAINEL DE GERENCIAMENTO - CORRIGIDO
+    # =====================================================================
+    if "_manage_target" in st.session_state:
+        manage_target = st.session_state["_manage_target"]
+        
+        # Verificar se o arquivo ainda existe
+        if not any(r["file"] == manage_target for r in st.session_state.get("resultados", [])):
+            st.session_state.pop("_manage_target", None)
+            st.rerun()
+        
+        st.markdown('<div class="manage-panel">', unsafe_allow_html=True)
+        st.markdown(f"### ⚙️ Gerenciar: `{manage_target}`")
+        
+        file_path = session_folder / manage_target
+        
+        # Obter informações das páginas
+        try:
+            reader = PdfReader(str(file_path))
+            total_pages = len(reader.pages)
+            pages_info = [{"idx": i, "label": f"Página {i+1}"} for i in range(total_pages)]
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo: {str(e)}")
+            pages_info = []
+            total_pages = 0
+        
+        if pages_info:
+            st.info(f"📄 O arquivo possui **{total_pages} página(s)**")
+            
+            # Inicializar seleção de páginas
+            sel_key = f"_manage_sel_{manage_target}"
+            if sel_key not in st.session_state:
+                st.session_state[sel_key] = []
+            
+            col_sel, col_actions = st.columns([1, 2])
+            
+            with col_sel:
+                st.markdown("**Selecionar páginas:**")
+                for page in pages_info:
+                    is_checked = page["idx"] in st.session_state.get(sel_key, [])
+                    if st.checkbox(page["label"], value=is_checked, key=f"{sel_key}_{page['idx']}"):
+                        if page["idx"] not in st.session_state[sel_key]:
+                            st.session_state[sel_key].append(page["idx"])
                     else:
-                        p = int(parte)
-                        if 1 <= p <= total_pg:
-                            writer.add_page(reader.pages[p-1])
-                            added += 1
+                        if page["idx"] in st.session_state[sel_key]:
+                            st.session_state[sel_key].remove(page["idx"])
+            
+            with col_actions:
+                st.markdown("**Ações:**")
                 
-                if added > 0:
-                    out = io.BytesIO()
-                    writer.write(out)
-                    out.seek(0)
-                    st.download_button(f"⬇️ Baixar Separado ({added} pág)", out, f"split_{sel_split}", "application/pdf")
-                    st.success("Pronto para baixar!")
-                else:
-                    st.warning("Nenhuma página válida selecionada.")
-            except Exception as e:
-                st.error(f"Erro: {e}")
+                selected_count = len(st.session_state.get(sel_key, []))
+                st.write(f"📑 Páginas selecionadas: **{selected_count}**")
+                
+                # Nome para novo arquivo
+                new_name_key = f"_manage_newname_{manage_target}"
+                if new_name_key not in st.session_state:
+                    base_name = manage_target.rsplit('.pdf', 1)[0]
+                    st.session_state[new_name_key] = f"{base_name}_parte.pdf"
+                
+                new_name = st.text_input("Nome do novo PDF:", 
+                                       value=st.session_state[new_name_key],
+                                       key=new_name_key)
+                
+                col_sep, col_rem, col_close = st.columns(3)
+                
+                with col_sep:
+                    if st.button("➗ Separar páginas", key=f"sep_{manage_target}"):
+                        selected = sorted(st.session_state.get(sel_key, []))
+                        if not selected:
+                            st.warning("Selecione pelo menos uma página para separar.")
+                        else:
+                            try:
+                                # Criar novo PDF com páginas selecionadas
+                                new_writer = PdfWriter()
+                                reader = PdfReader(str(file_path))
+                                
+                                for page_idx in selected:
+                                    if 0 <= page_idx < len(reader.pages):
+                                        new_writer.add_page(reader.pages[page_idx])
+                                
+                                # Salvar novo arquivo
+                                new_path = session_folder / new_name
+                                with open(new_path, "wb") as f:
+                                    new_writer.write(f)
+                                
+                                # Adicionar aos resultados
+                                new_meta = {
+                                    "file": new_name,
+                                    "numero": files_meta.get(manage_target, {}).get("numero", ""),
+                                    "emitente": files_meta.get(manage_target, {}).get("emitente", ""),
+                                    "pages": len(selected)
+                                }
+                                
+                                st.session_state["resultados"].append(new_meta)
+                                st.session_state["files_meta"][new_name] = {
+                                    "numero": new_meta["numero"],
+                                    "emitente": new_meta["emitente"], 
+                                    "pages": new_meta["pages"]
+                                }
+                                st.session_state["novos_nomes"][new_name] = new_name
+                                
+                                st.success(f"✅ Arquivo separado criado: `{new_name}`")
+                                st.session_state[sel_key] = []  # Limpar seleção
+                                
+                            except Exception as e:
+                                st.error(f"❌ Erro ao separar páginas: {str(e)}")
+                
+                with col_rem:
+                    if st.button("🗑️ Remover páginas", key=f"rem_{manage_target}"):
+                        selected = sorted(st.session_state.get(sel_key, []))
+                        if not selected:
+                            st.warning("Selecione páginas para remover.")
+                        else:
+                            try:
+                                # Criar novo PDF sem as páginas selecionadas
+                                new_writer = PdfWriter()
+                                reader = PdfReader(str(file_path))
+                                
+                                for page_idx in range(len(reader.pages)):
+                                    if page_idx not in selected:
+                                        new_writer.add_page(reader.pages[page_idx])
+                                
+                                # Se sobrou alguma página, salvar o arquivo
+                                if len(new_writer.pages) > 0:
+                                    with open(file_path, "wb") as f:
+                                        new_writer.write(f)
+                                    
+                                    # Atualizar metadados
+                                    st.session_state["files_meta"][manage_target]["pages"] = len(new_writer.pages)
+                                    for r in st.session_state["resultados"]:
+                                        if r["file"] == manage_target:
+                                            r["pages"] = len(new_writer.pages)
+                                    
+                                    st.success(f"✅ {len(selected)} página(s) removida(s)")
+                                else:
+                                    # Se não sobrou nenhuma página, excluir o arquivo
+                                    file_path.unlink()
+                                    st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != manage_target]
+                                    st.session_state["files_meta"].pop(manage_target, None)
+                                    st.session_state["novos_nomes"].pop(manage_target, None)
+                                    st.success(f"📭 Arquivo `{manage_target}` foi excluído (ficou vazio)")
+                                    st.session_state.pop("_manage_target", None)
+                                
+                                st.session_state[sel_key] = []  # Limpar seleção
+                                st.rerun()
+                                
+                            except Exception as e:
+                                st.error(f"❌ Erro ao remover páginas: {str(e)}")
+                
+                with col_close:
+                    if st.button("❌ Fechar", key=f"close_{manage_target}"):
+                        st.session_state.pop("_manage_target", None)
+                        st.session_state.pop(sel_key, None)
+                        st.rerun()
         
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # --- FERRAMENTA 2: MERGE (JUNTAR) ---
-    with c_merge:
-        st.markdown('<div class="tool-box"><h5>🔗 Juntar Arquivos (Merge)</h5>', unsafe_allow_html=True)
+        else:
+            st.warning("Não foi possível carregar as páginas do arquivo.")
+            if st.button("❌ Fechar", key=f"close_err_{manage_target}"):
+                st.session_state.pop("_manage_target", None)
+                st.rerun()
         
-        sel_merge = st.multiselect("Selecione os arquivos (na ordem):", lista_nomes, key="sel_merge")
-        nome_merge = st.text_input("Nome do novo arquivo:", "agrupado.pdf", key="name_merge")
-        
-        if st.button("Juntar PDFs", key="btn_merge") and sel_merge:
-            try:
-                writer = PdfWriter()
-                count_files = 0
-                
-                for nome in sel_merge:
-                    caminho = opcoes_arquivos[nome]["path"]
-                    r_temp = PdfReader(caminho)
-                    for p in r_temp.pages:
-                        writer.add_page(p)
-                    count_files += 1
-                
-                out = io.BytesIO()
-                writer.write(out)
-                out.seek(0)
-                
-                safe_name = nome_merge if nome_merge.endswith(".pdf") else f"{nome_merge}.pdf"
-                st.download_button(f"⬇️ Baixar ({count_files} arquivos unidos)", out, safe_name, "application/pdf")
-                st.success("Unido com sucesso!")
-                
-            except Exception as e:
-                st.error(f"Erro: {e}")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown('</div>', unsafe_allow_html=True)
+    # Dashboard analítico
+    criar_dashboard_analitico()
 
-    # =================================================================
-    # DOWNLOAD EM MASSA
-    # =================================================================
+    # Mostrar logs se solicitado
+    if show_logs and st.session_state.get("processed_logs"):
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown("### 📝 Logs de processamento (últimas páginas)")
+        for entry in st.session_state["processed_logs"][-200:]:
+            label, t, status, info, provider = (entry + ("", "", ""))[:5]
+            if status == "OK":
+                st.markdown(f"<div class='success-log'>✅ {label} — {info} — {t:.2f}s</div>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"<div class='warning-log'>⚠️ {label} — {info}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.session_state["novos_nomes"] = novos_nomes
+
     st.markdown("---")
-    if st.button("📦 Baixar ZIP Completo"):
-        mem_zip = io.BytesIO()
-        with zipfile.ZipFile(mem_zip, "w") as zf:
-            for item in results:
-                p = Path(item["path"])
-                if p.exists(): zf.write(p, arcname=p.name)
-        mem_zip.seek(0)
-        st.download_button("⬇️ Download ZIP", mem_zip, "processados.zip", "application/zip")
-    
-    # Backup Padrões
-    st.markdown("---")
-    st.download_button("Exportar Padrões", json.dumps(PATTERNS), "padroes.json")
+    col_dl_a, col_dl_b = st.columns([1,3])
+    with col_dl_a:
+        if st.button("📦 Baixar tudo (ZIP)"):
+            mem = io.BytesIO()
+            with zipfile.ZipFile(mem, "w") as zf:
+                for r in st.session_state.get("resultados", []):
+                    fname = r["file"]
+                    src = session_folder / fname
+                    if src.exists():
+                        zf.write(src, arcname=st.session_state.get("novos_nomes", {}).get(fname, fname))
+            mem.seek(0)
+            st.download_button("⬇️ Clique para baixar (ZIP)", data=mem, file_name="notas_processadas.zip", mime="application/zip")
+    with col_dl_b:
+        st.markdown("<div class='small-note'>Dica: edite nomes na lista e use 'Baixar Selecionadas' para baixar apenas o que precisar.</div>", unsafe_allow_html=True)
+
+else:
+    st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
+
