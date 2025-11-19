@@ -309,6 +309,59 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
             else:
                 return {"error": str(e)}, False, 0, "Gemini"
     return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
+                def processar_pagina_worker(job_data):
+                    """Função executada em paralelo para processar uma página"""
+                    pdf_bytes = job_data["bytes"]
+                    prompt = job_data["prompt"]
+                    name = job_data["name"]
+                    page_idx = job_data["page_idx"]
+                    
+                    # 1. Verificar Cache
+                    cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
+                    cached_result = document_cache.get(cache_key)
+                    
+                    # Se tiver cache e o usuário quiser usar
+                    if cached_result and job_data["use_cache"]:
+                        return {
+                            "status": "CACHE",
+                            "dados": cached_result['dados'],
+                            "tempo": cached_result['tempo'],
+                            "provider": cached_result['provider'],
+                            "name": name,
+                            "page_idx": page_idx,
+                            "pdf_bytes": pdf_bytes
+                        }
+                
+                    # 2. Se não tiver cache, chama o Gemini
+                    page_stream = io.BytesIO(pdf_bytes)
+                    dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
+                    
+                    # Salvar no cache se deu certo
+                    if ok and "error" not in dados:
+                        document_cache.set(cache_key, {
+                            'dados': dados,
+                            'tempo': tempo,
+                            'provider': provider
+                        })
+                        return {
+                            "status": "OK",
+                            "dados": dados,
+                            "tempo": tempo,
+                            "provider": provider,
+                            "name": name,
+                            "page_idx": page_idx,
+                            "pdf_bytes": pdf_bytes
+                        }
+                    else:
+                        return {
+                            "status": "ERRO",
+                            "dados": dados,
+                            "tempo": tempo,
+                            "provider": provider,
+                            "name": name,
+                            "page_idx": page_idx,
+                            "error_msg": dados.get("error", "Erro desconhecido")
+                        }
 
 # =====================================================================
 # SIDEBAR CONFIGURAÇÕES
@@ -431,86 +484,100 @@ if uploaded_files and process_btn:
         "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
     )
 
+# --- INÍCIO DO BLOCO NOVO (TURBO) ---
+    
+    # 1. Preparar trabalhos (Jobs)
+    jobs = []
     for a in arquivos:
         name = a["name"]
         try:
             reader = PdfReader(io.BytesIO(a["bytes"]))
-        except Exception:
-            processed_logs.append((name, 0, "ERRO_LEITURA", "", "Gemini"))
-            continue
-
-        for idx, page in enumerate(reader.pages):
-            # Verificar cache primeiro
-            b = io.BytesIO()
-            w = PdfWriter()
-            w.add_page(page)
-            w.write(b)
-            b.seek(0)
-            
-            cache_key = document_cache.get_cache_key(b.getvalue(), prompt)
-            cached_result = document_cache.get(cache_key)
-            
-            if cached_result and st.session_state.get("use_cache", True):
-                dados, tempo, provider = cached_result['dados'], cached_result['tempo'], cached_result['provider']
-                ok = True
-                st.sidebar.info("💾 Usando cache")
-            else:
-                # Processar com Gemini
-                dados, ok, tempo, provider = processar_pagina_gemini(prompt, b)
+            for idx, page in enumerate(reader.pages):
+                # Extrair bytes da página individualmente para enviar ao worker
+                b = io.BytesIO()
+                w = PdfWriter()
+                w.add_page(page)
+                w.write(b)
+                page_bytes = b.getvalue()
                 
-                # Salvar no cache se bem-sucedido
-                if ok and "error" not in dados:
-                    document_cache.set(cache_key, {
-                        'dados': dados,
-                        'tempo': tempo,
-                        'provider': provider
-                    })
-            
-            page_label = f"{name} (pág {idx+1})"
-            if not ok or "error" in dados:
-                processed_logs.append((page_label, tempo, "ERRO_IA", dados.get("error", str(dados)), provider))
-                progresso += 1
-                progress_bar.progress(min(progresso/total_paginas, 1.0))
-                progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO IA</span>", unsafe_allow_html=True)
-                resultados_meta.append({
-                    "arquivo_origem": name,
-                    "pagina": idx+1,
-                    "emitente_detectado": dados.get("emitente") if isinstance(dados, dict) else "-",
-                    "numero_detectado": dados.get("numero_nota") if isinstance(dados, dict) else "-",
-                    "status": "ERRO",
-                    "provider": provider
+                jobs.append({
+                    "bytes": page_bytes,
+                    "prompt": prompt,
+                    "name": name,
+                    "page_idx": idx,
+                    "use_cache": st.session_state.get("use_cache", True)
                 })
-                continue
+        except Exception as e:
+            processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "System"))
 
-            # Validar e corrigir dados
-            dados = validar_e_corrigir_dados(dados)
+    # 2. Executar em Paralelo
+    MAX_WORKERS = 4  # Número de processamentos simultâneos (seguro)
+    processed_count = 0
+    total_jobs = len(jobs) if jobs else 1
+    
+    st.info(f"🚀 Iniciando processamento TURBO de {len(jobs)} páginas com {MAX_WORKERS} threads simultâneas...")
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_job = {executor.submit(processar_pagina_worker, job): job for job in jobs}
+        
+        for future in as_completed(future_to_job):
+            processed_count += 1
+            try:
+                result = future.result()
+                
+                name = result["name"]
+                idx = result["page_idx"]
+                page_label = f"{name} (pág {idx+1})"
+                
+                if result["status"] == "ERRO":
+                    processed_logs.append((page_label, result["tempo"], "ERRO_IA", result["error_msg"], result["provider"]))
+                    progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO</span>", unsafe_allow_html=True)
+                    resultados_meta.append({
+                        "arquivo_origem": name, "pagina": idx+1, "status": "ERRO", "provider": result["provider"]
+                    })
+                else:
+                    # Sucesso (OK ou CACHE)
+                    dados = result["dados"]
+                    tempo = result["tempo"]
+                    provider = result["provider"]
+                    
+                    # Validação e Correção (usando suas funções existentes)
+                    dados = validar_e_corrigir_dados(dados)
+                    
+                    emitente_raw = dados.get("emitente", "") or ""
+                    numero_raw = dados.get("numero_nota", "") or ""
+                    cidade_raw = dados.get("cidade", "") or ""
 
-            emitente_raw = dados.get("emitente", "") or ""
-            numero_raw = dados.get("numero_nota", "") or ""
-            cidade_raw = dados.get("cidade", "") or ""
+                    numero = limpar_numero(numero_raw)
+                    nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
+                    emitente = limpar_emitente(nome_map)
 
-            numero = limpar_numero(numero_raw)
-            nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
-            emitente = limpar_emitente(nome_map)
+                    # Guardar para gerar o PDF final
+                    key = (numero, emitente)
+                    # Importante: result["pdf_bytes"] contém a página individual
+                    agrupados_bytes.setdefault(key, []).append(result["pdf_bytes"])
 
-            key = (numero, emitente)
-            agrupados_bytes.setdefault(key, []).append(b.getvalue())
+                    status_lbl = "CACHE" if result["status"] == "CACHE" else "OK"
+                    css_class = "success-log" if result["status"] == "OK" else "warning-log"
+                    
+                    processed_logs.append((page_label, tempo, status_lbl, f"{numero} / {emitente}", provider))
+                    resultados_meta.append({
+                        "arquivo_origem": name,
+                        "pagina": idx+1,
+                        "emitente_detectado": emitente_raw,
+                        "numero_detectado": numero_raw,
+                        "status": status_lbl,
+                        "tempo_s": round(tempo, 2),
+                        "provider": provider
+                    })
+                    progresso_text.markdown(f"<span class='{css_class}'>✅ {page_label} — {status_lbl} ({tempo:.2f}s)</span>", unsafe_allow_html=True)
 
-            processed_logs.append((page_label, tempo, "OK", f"{numero} / {emitente}", provider))
-            resultados_meta.append({
-                "arquivo_origem": name,
-                "pagina": idx+1,
-                "emitente_detectado": emitente_raw,
-                "numero_detectado": numero_raw,
-                "status": "OK",
-                "tempo_s": round(tempo, 2),
-                "provider": provider
-            })
+            except Exception as e:
+                st.error(f"Erro crítico no worker: {e}")
+            
+            progress_bar.progress(min(processed_count/total_jobs, 1.0))
 
-            progresso += 1
-            progress_bar.progress(min(progresso/total_paginas, 1.0))
-            progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — OK ({tempo:.2f}s)</span>", unsafe_allow_html=True)
-
+    # --- FIM DO BLOCO NOVO ---
     resultados = []
     files_meta = {}
     for (numero, emitente), pages_bytes in agrupados_bytes.items():
