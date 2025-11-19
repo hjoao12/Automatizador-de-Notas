@@ -475,8 +475,9 @@ if uploaded_files and process_btn:
                 ), "name": name, "page_idx": idx, "use_cache": use_cache, "mode": mode_sel})
         except Exception as e:
             st.warning(f"Erro ao ler páginas de {name}: {e}")
-
-    # executar em paralelo
+    if not jobs:
+    st.error("Nenhuma página válida encontrada nos PDFs enviados.")
+    st.stop()
     # executar em paralelo
 agrupados_bytes = {}
 processed_logs = []
