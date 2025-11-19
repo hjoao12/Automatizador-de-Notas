@@ -1,9 +1,6 @@
-# turbo_v5_final_fixed.py
-# Versão: Turbo v5 — Corrigida e Completa (com Download ZIP e UI de Resultados)
+# turbo_v5_corrected_sections_part1.py
+# Parte 1/3 — imports, configuração inicial, cache, padrões e normalização
 
-# =====================================================================
-# PARTE 1/6 — IMPORTS E CONFIGURAÇÃO INICIAL
-# =====================================================================
 import os
 import io
 import time
@@ -15,28 +12,27 @@ import unicodedata
 import re
 import hashlib
 import pickle
+import fitz
 import base64
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-import fitz  # PyMuPDF
 import openai
-import streamlit as st
+from pathlib import Path
 from PyPDF2 import PdfReader, PdfWriter
-from dotenv import load_dotenv
-
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
+import streamlit as st
+from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
 # =====================================================================
 load_dotenv()
-st.set_page_config(page_title="Automatizador de Notas Fiscais", page_icon="📄", layout="centered")
+st.set_page_config(page_title="Automatizador de Notas Fiscais", page_icon="icone.ico")
 
 # ======= CSS Corporativo Claro =======
 st.markdown("""
 <style>
+/* ... seu CSS (mesmo que já estava) ... */
 body {
   background-color: #f8f9fa;
   color: #212529;
@@ -55,7 +51,6 @@ div.stButton > button {
   border-radius: 8px;
   border: none;
   font-weight: 500;
-  width: 100%;
 }
 div.stButton > button:hover {
   background-color: #0b3a5a;
@@ -63,17 +58,22 @@ div.stButton > button:hover {
 .stProgress > div > div > div > div {
   background-color: #28a745 !important;
 }
-.success-log { color: #155724; background-color: #d4edda; padding: 4px 8px; border-radius: 4px; font-size: 0.9em; }
-.warning-log { color: #856404; background-color: #fff3cd; padding: 4px 8px; border-radius: 4px; font-size: 0.9em; }
-.error-log { color: #721c24; background-color: #f8d7da; padding: 4px 8px; border-radius: 4px; font-size: 0.9em; }
-.card { background: #fff; padding: 20px; border-radius:10px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); margin-bottom:20px; }
+.success-log { color: #155724; background-color: #d4edda; padding: 6px 10px; border-radius: 6px; }
+.warning-log { color: #856404; background-color: #fff3cd; padding: 6px 10px; border-radius: 6px; }
+.error-log { color: #721c24; background-color: #f8d7da; padding: 6px 10px; border-radius: 6px; }
+.top-actions { display: flex; gap: 10px; align-items: center; }
+.block-container { padding-top: 2rem; }
+.small-note { font-size:13px; color:#6b7280; }
+.card { background: #fff; padding: 12px; border-radius:8px; box-shadow: 0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
+.metric-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; }
+.manage-panel { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0f4c81; margin: 10px 0; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("Automatizador de Notas Fiscais PDF")
 
 # =====================================================================
-# PARTE 2/6 — CACHE INTELIGENTE E VARIÁVEIS GLOBAIS
+# CACHE INTELIGENTE
 # =====================================================================
 class DocumentCache:
     def __init__(self, cache_dir="./cache"):
@@ -82,7 +82,7 @@ class DocumentCache:
 
     def get_cache_key(self, pdf_bytes, prompt):
         content_hash = hashlib.md5(pdf_bytes).hexdigest()
-        prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
+        prompt_hash = hashlib.md5(prompt.encode() if isinstance(prompt, str) else prompt).hexdigest()
         return f"{content_hash}_{prompt_hash}"
 
     def _cache_path(self, key):
@@ -126,14 +126,16 @@ class DocumentCache:
 document_cache = DocumentCache()
 
 # =====================================================================
-# PARTE 3/6 — CONFIG, PADRÕES E NORMALIZAÇÃO
+# PASTA TEMP, CONSTANTES E PADRÕES
 # =====================================================================
 TEMP_FOLDER = Path("./temp")
 TEMP_FOLDER.mkdir(exist_ok=True)
 
+MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
-MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "2"))
-MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "10"))
+MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
+MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
+
 PATTERNS_FILE = "patterns.json"
 
 def load_patterns():
@@ -207,24 +209,22 @@ def validar_e_corrigir_dados(dados):
         numero_limpo = re.sub(r"[^\d]", "", str(dados['numero_nota']))
         dados['numero_nota'] = numero_limpo if numero_limpo else "000000"
     return dados
+# turbo_v5_corrected_sections_part2.py
+# Parte 2/3 — clients e funções de processamento
 
-# =====================================================================
-# PARTE 4/6 — GEMINI / OPENAI CLIENTS E FUNÇÕES DE PROCESSAMENTO
-# =====================================================================
-# Gemini
+# === GEMINI / OPENAI CLIENTS ===
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GEMINI_API_KEY:
-    st.error("❌ Chave GOOGLE_API_KEY não encontrada no .env.")
+    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
     st.stop()
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    # Ajuste aqui para um modelo padrão estável se o usuário não definir a variável
-    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "gemini-1.5-flash"))
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
+    st.sidebar.success("✅ Gemini configurado")
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
     st.stop()
 
-# OpenAI client (opcional)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = None
 if OPENAI_API_KEY:
@@ -236,35 +236,35 @@ if OPENAI_API_KEY:
 
 def extrair_json_seguro(texto: str):
     texto = (texto or "").strip()
-    # Tenta encontrar array JSON
     match_array = re.search(r"\[.*\]", texto, re.DOTALL)
     if match_array:
         try:
             return json.loads(match_array.group())
-        except:
+        except Exception:
             pass
-    # Tenta encontrar objeto JSON
     match_obj = re.search(r"\{.*\}", texto, re.DOTALL)
     if match_obj:
         try:
-            return json.loads(match_obj.group())
-        except:
+            return [json.loads(match_obj.group())]
+        except Exception:
             pass
-    # Limpeza básica markdown
     clean = texto.replace("```json", "").replace("```", "").strip()
     try:
         return json.loads(clean)
-    except:
-        return {} # Retorna dict vazio em vez de lista vazia para evitar erro de tipo
+    except Exception:
+        return []
 
 def calcular_delay(tentativa, error_msg):
     try:
         em = (error_msg or "").lower()
-        if "retry in" in em:
+    except:
+        em = ""
+    if "retry in" in em:
+        try:
             seg = float(re.search(r"retry in (\d+\.?\d*)s", em).group(1))
             return min(seg + 2, MAX_RETRY_DELAY)
-    except:
-        pass
+        except:
+            pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
 def processar_pagina_gemini(prompt_instrucao, page_stream):
@@ -278,13 +278,12 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
             )
             tempo = round(time.time() - start, 2)
             texto = (resp.text or "").strip()
-            
-            # Usa a função segura para extrair
-            dados = extrair_json_seguro(texto)
-            
-            if not dados:
-                dados = {"error": "JSON inválido ou vazio", "_raw": texto[:200]}
-                
+            if texto.startswith("```"):
+                texto = texto.replace("```json", "").replace("```", "").strip()
+            try:
+                dados = json.loads(texto)
+            except Exception:
+                dados = {"error": "Resposta não era JSON válido", "_raw": texto[:600]}
             return dados, True, tempo, "Gemini"
         except ResourceExhausted as e:
             delay = calcular_delay(tentativa, str(e))
@@ -296,9 +295,46 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
                 return {"error": str(e)}, False, 0, "Gemini"
     return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
 
+def _extract_openai_text(resp):
+    """
+    Extração defensiva do conteúdo retornado pela API OpenAI (várias formas possíveis).
+    Retorna string com o conteúdo textual ou raise.
+    """
+    # resp pode ser um objeto ou dict; tente várias formas
+    try:
+        # objeto estilo openai (com atributos)
+        if hasattr(resp, "choices") and resp.choices:
+            choice0 = resp.choices[0]
+            # várias formas:
+            if hasattr(choice0, "message") and hasattr(choice0.message, "content"):
+                return choice0.message.content
+            if isinstance(choice0, dict):
+                m = choice0.get("message", {})
+                return m.get("content") or choice0.get("text") or json.dumps(choice0)
+        # se for dict
+        if isinstance(resp, dict):
+            c = resp.get("choices", [])
+            if c:
+                ch = c[0]
+                if isinstance(ch, dict):
+                    msg = ch.get("message")
+                    if isinstance(msg, dict):
+                        return msg.get("content") or ch.get("text")
+                    return ch.get("text") or json.dumps(ch)
+    except Exception:
+        pass
+    # fallback: tentar acessar resp['choices'][0]['message']['content'] com try/except
+    try:
+        return resp['choices'][0]['message']['content']
+    except Exception:
+        try:
+            return resp.choices[0].message['content']
+        except Exception:
+            return None
+
 def processar_pagina_openai_fallback(prompt_sistema, pdf_bytes):
     if not openai_client:
-        return {"error": "OpenAI não configurada"}, False, 0, "OpenAI"
+        return {"error": "OpenAI não configurada (.env)"}, False, 0, "OpenAI"
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         if len(doc) < 1:
@@ -307,23 +343,36 @@ def processar_pagina_openai_fallback(prompt_sistema, pdf_bytes):
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
         img_bytes = pix.tobytes("png")
         base64_image = base64.b64encode(img_bytes).decode('utf-8')
-        
+
         messages = [
-            {"role": "system", "content": "Extraia emitente, numero_nota e cidade. Retorne JSON."},
+            {"role": "system", "content": "Você é um assistente OCR. Extraia emitente, numero_nota e cidade e retorne JSON."},
             {"role": "user", "content": prompt_sistema + "\nIMAGEM: data:image/png;base64," + base64_image}
         ]
-        resp = openai_client.ChatCompletion.create(model="gpt-4o", messages=messages, temperature=0)
-        conteudo = resp.choices[0].message['content']
-        dados = extrair_json_seguro(conteudo)
-        return dados, True, 0, "GPT-Vision"
+
+        # chamada defensiva ao OpenAI (várias versões do SDK têm diferentes helpers)
+        try:
+            resp = openai_client.ChatCompletion.create(model="gpt-4o", messages=messages, temperature=0)
+        except Exception:
+            # tentar via openai.ChatCompletion (ou outra variação)
+            resp = openai_client.ChatCompletion.create(model="gpt-4o", messages=messages, temperature=0)
+
+        conteudo = _extract_openai_text(resp)
+        if conteudo is None:
+            # fallback: stringify resp para debug
+            conteudo = str(resp)
+
+        try:
+            dados = json.loads(conteudo)
+            return dados, True, 0, "GPT-Vision"
+        except Exception:
+            return {"error": "JSON Inválido OpenAI", "_raw": (conteudo or "")[:1000]}, False, 0, "GPT-Vision"
     except Exception as e:
         return {"error": f"Erro Vision: {str(e)}"}, False, 0, "GPT-Vision"
 
-# =====================================================================
-# PARTE 5/6 — WORKER E LOOP PRINCIPAL
-# =====================================================================
-
 def processar_pagina_worker(job_data):
+    """
+    job_data: {bytes, prompt, name, page_idx, use_cache, mode}
+    """
     pdf_bytes = job_data["bytes"]
     prompt = job_data["prompt"]
     name = job_data["name"]
@@ -331,17 +380,19 @@ def processar_pagina_worker(job_data):
     mode = job_data.get("mode", "GEMINI")
     use_cache = job_data.get("use_cache", True)
 
+    provider = "Unknown"  # <- inicialização defensiva
     cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
-    
     if use_cache:
-        cached_result = document_cache.get(cache_key)
+        cached_result = document_cache.get(cache_key, ttl_seconds=86400)
         if cached_result:
             return {
-                "status": "CACHE", 
-                "dados": cached_result.get('dados'), 
-                "tempo": cached_result.get('tempo', 0), 
-                "provider": cached_result.get('provider','CACHE'), 
-                "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes
+                "status": "CACHE",
+                "dados": cached_result.get('dados'),
+                "tempo": cached_result.get('tempo', 0),
+                "provider": cached_result.get('provider','CACHE'),
+                "name": name,
+                "page_idx": page_idx,
+                "pdf_bytes": pdf_bytes
             }
 
     if mode == "OPENAI":
@@ -349,61 +400,57 @@ def processar_pagina_worker(job_data):
     else:
         page_stream = io.BytesIO(pdf_bytes)
         dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
-        
-        # Fallback para OpenAI se Gemini falhar e OpenAI estiver configurada
         if (not ok or 'error' in dados) and openai_client:
             dados2, ok2, tempo2, prov2 = processar_pagina_openai_fallback(prompt, pdf_bytes)
             if ok2 and 'error' not in dados2:
                 dados, ok, tempo, provider = dados2, ok2, tempo2, prov2
 
     if ok and isinstance(dados, dict) and 'error' not in dados:
-        document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
+        try:
+            document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider}, ttl_seconds=86400)
+        except Exception:
+            pass
         return {"status": "OK", "dados": dados, "tempo": tempo, "provider": provider, "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes}
     else:
         err = dados.get('error') if isinstance(dados, dict) else str(dados)
         return {"status": "ERRO", "dados": dados, "tempo": tempo, "provider": provider, "name": name, "page_idx": page_idx, "error_msg": err, "pdf_bytes": pdf_bytes}
+# turbo_v5_corrected_sections_part3.py
+# Parte 3/3 — UI, sidebar, processamento paralelo e geração de arquivos
 
-# =====================================================================
-# PARTE 6/6 — UI, SIDEBAR E UPLOAD
-# =====================================================================
+# Sidebar: provider selection and cache/workers
 with st.sidebar:
     st.header("⚙️ Configuração")
     provider_label = st.radio("Modelo Principal", ["Gemini (Google)", "GPT-4o (OpenAI)"], index=0)
     mode_sel = "GEMINI" if "Gemini" in provider_label else "OPENAI"
     st.markdown("---")
     use_cache = st.checkbox("Usar Cache", value=True, key="use_cache")
-    workers = st.slider("Processamento Paralelo (Workers)", 1, 8, 4)
+    workers = st.slider("Workers", 1, 8, 4)
     if st.button("🔄 Limpar Cache"):
         document_cache.clear()
         st.success("Cache limpo!")
 
-# Lógica para limpar sessão
-if st.session_state.get("_limpar_sessao"):
-    if "session_folder" in st.session_state and st.session_state["session_folder"]:
-        try:
-            shutil.rmtree(st.session_state["session_folder"])
-        except:
-            pass
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    st.session_state["_limpar_sessao"] = False
-    st.rerun()
-
+# UPLOAD UI
 st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown("### 📎 Upload de Arquivos")
+st.markdown("### 📎 Enviar PDFs e processar")
 uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True, key="uploader")
-col1, col2 = st.columns([1,1])
-with col1:
-    process_btn = st.button("🚀 Processar Agora")
-with col2:
-    if st.button("♻️ Nova Sessão"):
-        st.session_state["_limpar_sessao"] = True
-        st.rerun()
+col_up_a, col_up_b = st.columns([1,1])
+with col_up_a:
+    process_btn = st.button("🚀 Processar PDFs")
+with col_up_b:
+    clear_session = st.button("♻️ Limpar sessão")
 st.markdown("</div>", unsafe_allow_html=True)
 
-# =====================================================================
-# LÓGICA DE PROCESSAMENTO
-# =====================================================================
+if clear_session:
+    if "session_folder" in st.session_state:
+        try:
+            shutil.rmtree(st.session_state["session_folder"])
+        except Exception:
+            pass
+    for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
+        st.session_state.pop(k, None)
+    st.success("Sessão limpa.")
+    st.rerun()
+
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
@@ -412,135 +459,129 @@ if uploaded_files and process_btn:
     arquivos = []
     for f in uploaded_files:
         try:
-            arquivos.append({"name": f.name, "bytes": f.read()})
-        except:
-            st.warning(f"Ignorado (erro leitura): {f.name}")
+            b = f.read()
+            arquivos.append({"name": f.name, "bytes": b})
+        except Exception:
+            st.warning(f"Erro ao ler {f.name}, ignorado.")
 
-    if not arquivos:
-        st.error("Nenhum arquivo válido.")
-        st.stop()
+    total_paginas = 0
+    for a in arquivos:
+        try:
+            r = PdfReader(io.BytesIO(a["bytes"]))
+            total_paginas += len(r.pages)
+        except Exception:
+            st.warning(f"Arquivo inválido: {a['name']}")
 
-    # Prepara Jobs
+    st.info(f"📄 Total de páginas a processar: {total_paginas}")
+
+    # preparar jobs por página
     jobs = []
     for a in arquivos:
+        name = a["name"]
         try:
             reader = PdfReader(io.BytesIO(a["bytes"]))
             for idx, page in enumerate(reader.pages):
-                b_io = io.BytesIO()
-                writer = PdfWriter()
-                writer.add_page(page)
-                writer.write(b_io)
+                b = io.BytesIO()
+                w = PdfWriter()
+                w.add_page(page)
+                w.write(b)
+                page_bytes = b.getvalue()
                 jobs.append({
-                    "bytes": b_io.getvalue(),
-                    "prompt": 'Analise a nota fiscal. Retorne SOMENTE JSON: {"emitente":"NOME","numero_nota":"123","cidade":"CIDADE"}',
-                    "name": a["name"],
+                    "bytes": page_bytes,
+                    "prompt": (
+                        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
+                        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+                    ),
+                    "name": name,
                     "page_idx": idx,
                     "use_cache": use_cache,
                     "mode": mode_sel
                 })
         except Exception as e:
-            st.warning(f"Erro no arquivo {a['name']}: {e}")
+            st.warning(f"Erro ao ler páginas de {name}: {e}")
 
     if not jobs:
-        st.error("Nenhuma página encontrada.")
+        st.error("Nenhuma página válida encontrada nos PDFs enviados.")
         st.stop()
 
-    # Executa Paralelo
+    # executar em paralelo
     agrupados_bytes = {}
     processed_logs = []
+    resultados_meta = []
     processed_count = 0
-    total = len(jobs)
-    
-    bar = st.progress(0)
-    status_txt = st.empty()
-    start_time = time.time()
+    total_jobs = len(jobs) if jobs else 1
+    progress_bar = st.progress(0.0)
+    progresso_text = st.empty()
+
+    start_all = time.time()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_job = {executor.submit(processar_pagina_worker, j): j for j in jobs}
-        
+        future_to_job = {executor.submit(processar_pagina_worker, job): job for job in jobs}
+
         for future in as_completed(future_to_job):
             processed_count += 1
             try:
-                res = future.result()
-                label = f"{res['name']} (Pág {res['page_idx']+1})"
-                
-                if res["status"] == "ERRO":
-                    status_txt.markdown(f"<span class='error-log'>❌ {label}: {res.get('error_msg')}</span>", unsafe_allow_html=True)
+                result = future.result()
+                name = result.get("name")
+                idx = result.get("page_idx")
+                page_label = f"{name} (pág {idx+1})"
+                if result.get("status") == "ERRO":
+                    processed_logs.append((page_label, result.get("tempo",0), "ERRO_IA", result.get("error_msg","erro"), result.get("provider","")))
+                    progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO</span>", unsafe_allow_html=True)
                 else:
-                    dados = validar_e_corrigir_dados(res["dados"])
-                    numero = limpar_numero(dados.get("numero_nota"))
-                    cidade = dados.get("cidade")
-                    emitente = limpar_emitente(substituir_nome_emitente(dados.get("emitente"), cidade))
-                    
+                    dados = result.get("dados", {})
+                    tempo = result.get("tempo", 0)
+                    provider_used = result.get("provider", "")
+                    dados = validar_e_corrigir_dados(dados)
+                    emitente_raw = dados.get("emitente","")
+                    numero_raw = dados.get("numero_nota","")
+                    cidade_raw = dados.get("cidade","")
+                    numero = limpar_numero(numero_raw)
+                    nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
+                    emitente = limpar_emitente(nome_map)
                     key = (numero, emitente)
-                    agrupados_bytes.setdefault(key, []).append(res["pdf_bytes"])
-                    
-                    status_txt.markdown(f"<span class='success-log'>✅ {label} > {numero} - {emitente}</span>", unsafe_allow_html=True)
-                    
-                processed_logs.append(res)
+                    agrupados_bytes.setdefault(key, []).append(result.get("pdf_bytes"))
+                    status_lbl = result.get("status")
+                    processed_logs.append((page_label, tempo, status_lbl, f"{numero} / {emitente}", provider_used))
+                    resultados_meta.append({"arquivo_origem": name, "pagina": idx+1, "emitente_detectado": emitente_raw, "numero_detectado": numero_raw, "status": status_lbl, "tempo_s": round(tempo,2), "provider": provider_used})
+                    progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — {status_lbl} ({tempo:.2f}s)</span>", unsafe_allow_html=True)
             except Exception as e:
-                print(f"Erro thread: {e}")
-            
-            bar.progress(min(processed_count / total, 1.0))
+                st.error(f"Erro crítico no worker: {e}")
 
-    # Gera PDFs Finais
+            progress_bar.progress(min(processed_count/total_jobs, 1.0))
+
+    # gerar arquivos finais
     resultados = []
-    for (num, emit), pages_list in agrupados_bytes.items():
-        if not num or num == "0": continue
-        
-        merger = PdfWriter()
-        p_count = 0
-        for p_bytes in pages_list:
+    files_meta = {}
+    for (numero, emitente), pages_bytes in agrupados_bytes.items():
+        if not numero or numero == "0":
+            continue
+        writer = PdfWriter()
+        count = 0
+        for pb in pages_bytes:
             try:
-                r = PdfReader(io.BytesIO(p_bytes))
+                r = PdfReader(io.BytesIO(pb))
                 for p in r.pages:
-                    merger.add_page(p)
-                    p_count += 1
-            except: pass
-            
-        if p_count > 0:
-            fname = f"DOC_{num}_{emit}.pdf"
-            fpath = session_folder / fname
-            with open(fpath, "wb") as fout:
-                merger.write(fout)
-            resultados.append({"file": fname, "numero": num, "emitente": emit, "paginas": p_count})
+                    writer.add_page(p)
+                    count += 1
+            except Exception:
+                continue
+        if count == 0:
+            continue
+        # garantir que emitente já está sanitizado
+        safe_emitente = limpar_emitente(emitente)
+        nome_pdf = f"DOC {numero}_{safe_emitente}.pdf"
+        caminho = session_folder / nome_pdf
+        with open(caminho, "wb") as f_out:
+            writer.write(f_out)
+        resultados.append({"file": nome_pdf, "numero": numero, "emitente": safe_emitente, "pages": count})
+        files_meta[nome_pdf] = {"numero": numero, "emitente": safe_emitente, "pages": count}
 
-    # Salva na Sessão e Recarrega
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
-    st.session_state["logs"] = processed_logs
-    st.success(f"Concluído! {len(resultados)} documentos gerados.")
+    st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
+    st.session_state["processed_logs"] = processed_logs
+    st.session_state["files_meta"] = files_meta
+
+    st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
     st.rerun()
-
-# =====================================================================
-# PARTE 7/6 — EXIBIÇÃO DE RESULTADOS (TELA PÓS-PROCESSAMENTO)
-# =====================================================================
-if "resultados" in st.session_state and st.session_state["resultados"]:
-    st.markdown("---")
-    st.header("📂 Arquivos Gerados")
-    
-    res_data = st.session_state["resultados"]
-    
-    # Cria ZIP na memória
-    mem_zip = io.BytesIO()
-    with zipfile.ZipFile(mem_zip, "w") as zf:
-        base_path = Path(st.session_state["session_folder"])
-        for r in res_data:
-            p = base_path / r["file"]
-            if p.exists():
-                zf.write(p, arcname=r["file"])
-    
-    col_d1, col_d2 = st.columns([2, 1])
-    with col_d1:
-        st.success(f"Processamento finalizado com sucesso! {len(res_data)} arquivos prontos.")
-    with col_d2:
-        st.download_button(
-            label="📦 Baixar Todos (ZIP)",
-            data=mem_zip.getvalue(),
-            file_name="notas_organizadas.zip",
-            mime="application/zip"
-        )
-
-    st.dataframe(res_data, use_container_width=True)
-
-# FIM
