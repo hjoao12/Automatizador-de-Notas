@@ -15,6 +15,7 @@ import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
