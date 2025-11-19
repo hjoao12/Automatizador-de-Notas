@@ -170,40 +170,49 @@ MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 # =====================================================================
 # NORMALIZAÇÃO E SUBSTITUIÇÕES
 # =====================================================================
-SUBSTITUICOES_FIXAS = {
-    "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
-    "COMPANHIA DE AGUA E ESGOTOS DA PARAÍBA": "CAGEPA",
-    "COMPANHIA DE AGUA E ESGOTO DA PARAIBA": "CAGEPA",
-    "CIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
-    "COMPANHIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
-    "CAGECE": "CAGECE",
-    "TRANSPORTE LIDA": "TRANSPORTE_LIDA",
-    "TRANSPORTE LIDA LTDA": "TRANSPORTE_LIDA",
-    "TRANSPORTELIDA": "TRANSPORTE_LIDA",
-    "UNIPAR CARBOCLORO": "UNIPAR_CARBOCLORO",
-    "UNIPAR CARBOCLORO LTDA": "UNIPAR_CARBOCLORO",
-    "UNIPAR_CARBLOCLORO LTDA": "UNIPAR_CARBOCLORO",
-    "EXPRESS TCM": "EXPRESS_TCM",
-    "EXPRESS TCM LTDA": "EXPRESS_TCM",
-    "MDM RENOVADORA DE PNEUS LTDA ME": "MDM_RENOVADORA", 
-    "MDM RENOVADORA DE PNEUS": "MDM_RENOVADORA",
-    "COMPANHIA DE AGUAS E ESGOTOS DO RN": "CAERN",
-    "EKIPE TEC DE SEG E INCENDIO LTDA ME": "EKIPE",
-    "PETRÓLEO BRASILEIRO S.A": "PETROBRAS",
-    "PETROLEO BRASILEIRO S.A": "PETROBRAS",
-    "PETRÓLEO BRASILEIRO S A": "PETROBRAS",
-    "PETROLEO BRASILEIRO S A": "PETROBRAS",
-    "INNOVATIVE WATER CARE IND E COM DE PROD QUIM BRASIL LTDA": "SIGURA",
-    "COMERCIAL E IMPORTADORA DE PNEUS": "CAMPNEUS",
-    "EKIPE TEC DE SEG E INCENDIO LTDA ME": "EKIPE",
-    "URP CARGAS E LOGISTICA LTDA": "URP",
-    "U.R.P CARGAS & LOGISTICA LTDA": "URP",
-    "U.R.P CARGAS E LOGISTICA LTDA": "URP",
-    "MF DE MELO FILHO-ME": "MF_DE_MELO",
-    "M.F DE MELO FILHO": "MF_DE_MELO",
-    "M.F DE MELO FILHO-ME": "MF_DE_MELO",
+# =====================================================================
+# GESTÃO DE PADRÕES (NOVA LÓGICA DINÂMICA)
+# =====================================================================
+PATTERNS_FILE = "patterns.json"
+
+def load_patterns():
+    """Carrega padrões do arquivo JSON ou cria padrões padrão se não existir"""
+    # Seus padrões originais ficam aqui como backup/inicialização
+    default_patterns = {
+        "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
+        "COMPANHIA DE AGUA E ESGOTOS DA PARAÍBA": "CAGEPA",
+        "CIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
+        "COMPANHIA DE AGUAS E ESGOTOS DO RN": "CAERN",
+        "PETRÓLEO BRASILEIRO S.A": "PETROBRAS",
+        "PETROLEO BRASILEIRO S.A": "PETROBRAS",
+        "NEOENERGIA": "NEOENERGIA",
+        "EQUATORIAL": "EQUATORIAL"
+        # ... adicione outros essenciais aqui se quiser garantir que sempre existam no reset
+    }
+
+    # Se o arquivo não existe, cria ele com os defaults
+    if not os.path.exists(PATTERNS_FILE):
+        save_patterns(default_patterns)
+        return default_patterns
     
-}
+    try:
+        with open(PATTERNS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return default_patterns
+
+def save_patterns(patterns):
+    """Salva os padrões no arquivo JSON"""
+    try:
+        with open(PATTERNS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(patterns, f, ensure_ascii=False, indent=4)
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar padrões: {e}")
+        return False
+
+# Carrega os padrões para a memória ao iniciar o script
+SUBSTITUICOES_FIXAS = load_patterns()
 
 def _normalizar_texto(s: str) -> str:
     if not s:
@@ -377,6 +386,45 @@ with st.sidebar:
         document_cache.clear()
         st.success("Cache limpo!")
         st.rerun()
+    st.markdown("---")
+    st.markdown("### 📝 Gerenciar Padrões")
+    
+    with st.expander("Adicionar / Remover"):
+        st.markdown("O sistema aprende com esses padrões.")
+        
+        # --- ADICIONAR ---
+        with st.form("add_pattern_form"):
+            st.write("**Novo Padrão:**")
+            new_key = st.text_input("Texto na Nota (Original)", placeholder="Ex: CIA DE ELETRICIDADE")
+            new_value = st.text_input("Renomear para", placeholder="Ex: NEOENERGIA")
+            
+            if st.form_submit_button("💾 Salvar Novo"):
+                if new_key and new_value:
+                    SUBSTITUICOES_FIXAS[new_key.upper()] = new_value.upper()
+                    if save_patterns(SUBSTITUICOES_FIXAS):
+                        st.success("Salvo!")
+                        time.sleep(0.5)
+                        st.rerun()
+                else:
+                    st.warning("Preencha os dois campos.")
+
+        st.markdown("---")
+        
+        # --- REMOVER ---
+        st.write("**Padrões Ativos:**")
+        # Lista ordenada para facilitar
+        lista_padroes = sorted(SUBSTITUICOES_FIXAS.keys())
+        
+        sel_del = st.selectbox("Selecione para ver/excluir", [""] + lista_padroes)
+        
+        if sel_del:
+            st.info(f"Substitui por: **{SUBSTITUICOES_FIXAS[sel_del]}**")
+            if st.button("🗑️ Excluir este padrão"):
+                del SUBSTITUICOES_FIXAS[sel_del]
+                save_patterns(SUBSTITUICOES_FIXAS)
+                st.success("Removido!")
+                time.sleep(0.5)
+                st.rerun()
 
 # =====================================================================
 # DASHBOARD ANALÍTICO
