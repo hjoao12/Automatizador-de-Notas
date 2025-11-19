@@ -432,7 +432,7 @@ if clear_session:
     for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
         st.session_state.pop(k, None)
     st.success("Sessão limpa.")
-    st.rerun()
+    st.experimental_rerun()
 
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
@@ -477,17 +477,20 @@ if uploaded_files and process_btn:
             st.warning(f"Erro ao ler páginas de {name}: {e}")
 
     # executar em paralelo
-    agrupados_bytes = {}
-    processed_logs = []
-    resultados_meta = []
-    processed_count = 0
-    total_jobs = len(jobs) if jobs else 1
-    progress_bar = st.progress(0.0)
-    progresso_text = st.empty()
+    # executar em paralelo
+agrupados_bytes = {}
+processed_logs = []
+resultados_meta = []
+processed_count = 0
+total_jobs = len(jobs) if jobs else 1
+progress_bar = st.progress(0.0)
+progresso_text = st.empty()
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_job = {executor.submit(processar_pagina_worker, job): job for job in jobs}
-        for future in as_completed(future_to_job):
+start_all = time.time()   # ✅ CORREÇÃO: variável agora definida
+
+with ThreadPoolExecutor(max_workers=workers) as executor:
+    future_to_job = {executor.submit(processar_pagina_worker, job): job for job in jobs}
+    for future in as_completed(future_to_job):
             processed_count += 1
             try:
                 result = future.result()
