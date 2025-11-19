@@ -1,6 +1,6 @@
-# turbo_v3_full.py
-# Versão: Turbo v3 — Arquivo completo otimizado (modo B)
-# Mantive sua lógica original; otimizei leitura de PDFs, pool e geração final.
+# turbo_v5_refined.py
+# Versão: Turbo v5 — Refined (pypdf + Regex JSON + Multithreading Real)
+# Correções: fallback robusto, mapeamento perfeito, cache TTL, evitar sobrescrita, split e agrupamento manual
 
 import os
 import io
@@ -14,20 +14,23 @@ import re
 import hashlib
 import pickle
 from pathlib import Path
-from PyPDF2 import PdfReader, PdfWriter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# --- ATUALIZAÇÃO: Usando biblioteca moderna pypdf ---
+from pypdf import PdfReader, PdfWriter
+
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
 from dotenv import load_dotenv
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
 # =====================================================================
 load_dotenv()
 st.set_page_config(
-    page_title="Automatizador de Notas Fiscais",
-    page_icon="📄",
+    page_title="Automatizador de Notas Fiscais v5",
+    page_icon="⚡",
     layout="wide"
 )
 
@@ -35,76 +38,24 @@ st.set_page_config(
 st.markdown(
     """
 <style>
-body {
-  background-color: #f8f9fa;
-  color: #212529;
-  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
-}
-[data-testid="stSidebar"] {
-  background-color: #ffffff;
-  border-right: 1px solid #e9ecef;
-}
-h1, h2, h3, h4 {
-  color: #0f4c81;
-}
-div.stButton > button {
-  background-color: #0f4c81;
-  color: white;
-  border-radius: 8px;
-  border: none;
-  font-weight: 500;
-}
-div.stButton > button:hover {
-  background-color: #0b3a5a;
-}
-.stProgress > div > div > div > div {
-  background-color: #28a745 !important;
-}
-.success-log {
-  color: #155724;
-  background-color: #d4edda;
-  padding: 6px 10px;
-  border-radius: 6px;
-}
-.warning-log {
-  color: #856404;
-  background-color: #fff3cd;
-  padding: 6px 10px;
-  border-radius: 6px;
-}
-.error-log {
-  color: #721c24;
-  background-color: #f8d7da;
-  padding: 6px 10px;
-  border-radius: 6px;
-}
-.card { 
-  background: #fff; 
-  padding: 12px; 
-  border-radius:8px; 
-  box-shadow: 0 6px 18px rgba(15,76,129,0.04); 
-  margin-bottom:12px; 
-}
-.manage-panel { 
-  background: #f8f9fa; 
-  padding: 15px; 
-  border-radius: 8px; 
-  border-left: 4px solid #0f4c81; 
-  margin: 10px 0; 
-}
-.small-note {
-  font-size:13px;
-  color:#6b7280;
-}
+body { background-color: #f8f9fa; color: #212529; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
+[data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e9ecef; }
+h1, h2, h3, h4 { color: #0f4c81; }
+div.stButton > button { background-color: #0f4c81; color: white; border-radius: 8px; border: none; font-weight: 500; }
+div.stButton > button:hover { background-color: #0b3a5a; }
+.stProgress > div > div > div > div { background-color: #28a745 !important; }
+.card { background: #fff; padding: 12px; border-radius:8px; box-shadow: 0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
+.small-note { font-size:13px; color:#6b7280; }
+.warning-box { background-color: #fff3cd; border-left: 5px solid #ffc107; padding: 10px; border-radius: 4px; color: #856404; font-size: 0.9em; margin-bottom: 15px; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-st.title("Automatizador de Notas Fiscais PDF — Turbo Seguro (v3)")
+st.title("Automatizador de Notas Fiscais — Turbo v5 (Refined)")
 
 # =====================================================================
-# CONFIGURAÇÕES GERAIS E ESTRUTURAS
+# ESTRUTURAS E CONFIGURAÇÕES
 # =====================================================================
 TEMP_FOLDER = Path("./temp")
 TEMP_FOLDER.mkdir(exist_ok=True)
@@ -117,17 +68,20 @@ CONFIG_DIR.mkdir(exist_ok=True)
 
 PATTERNS_FILE = CONFIG_DIR / "patterns.json"
 
-# LIMITES E THREADS
-MAX_WORKERS_DEFAULT = max(2, min(4, (os.cpu_count() or 2)))
-MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "500"))
+# Limites (ajustáveis)
+MAX_WORKERS_DEFAULT = 4  # Seguro para Streamlit Cloud
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
-MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
-MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
+MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "2"))
+MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "15"))
+BATCH_SIZE_DEFAULT = int(os.getenv("BATCH_SIZE", "8"))
+CACHE_TTL_DIAS = int(os.getenv("CACHE_TTL_DIAS", "5"))
 
 # =====================================================================
-# SISTEMA DE CACHE INTELIGENTE
+# SISTEMA DE CACHE (com TTL)
 # =====================================================================
 class DocumentCache:
+    TTL_DIAS = CACHE_TTL_DIAS  # validade do cache em dias
+
     def __init__(self, cache_dir=CACHE_DIR):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
@@ -136,40 +90,47 @@ class DocumentCache:
         safe = re.sub(r"[^a-zA-Z0-9_\-]", "_", key)[:240]
         return self.cache_dir / f"{safe}.pkl"
 
+    def _is_expired(self, path: Path):
+        try:
+            idade = time.time() - path.stat().st_mtime
+            ttl_seg = self.TTL_DIAS * 86400
+            return idade > ttl_seg
+        except Exception:
+            return False
+
     def get_cache_key_file(self, file_bytes: bytes, prompt: str):
-        """Chave por arquivo inteiro + prompt"""
         content_hash = hashlib.md5(file_bytes).hexdigest()
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
         return f"{content_hash}_{prompt_hash}"
 
     def get(self, key):
-        cache_file = self._cache_path(key)
-        if cache_file.exists():
-            try:
-                with open(cache_file, "rb") as f:
-                    return pickle.load(f)
-            except (EOFError, pickle.UnpicklingError):
+        f = self._cache_path(key)
+        if f.exists():
+            if self._is_expired(f):
                 try:
-                    cache_file.unlink()
+                    f.unlink()
                 except Exception:
                     pass
                 return None
+            try:
+                with open(f, "rb") as h:
+                    return pickle.load(h)
             except Exception:
                 return None
         return None
 
     def set(self, key, data):
-        cache_file = self._cache_path(key)
+        f = self._cache_path(key)
         try:
-            with open(cache_file, "wb") as f:
-                pickle.dump(data, f)
+            with open(f, "wb") as h:
+                pickle.dump(data, h)
         except Exception:
-            return
+            pass
 
     def clear(self):
-        for cache_file in self.cache_dir.glob("*.pkl"):
+        for f in self.cache_dir.glob("*.pkl"):
             try:
-                cache_file.unlink()
+                f.unlink()
             except Exception:
                 pass
 
@@ -177,32 +138,23 @@ class DocumentCache:
 document_cache = DocumentCache()
 
 # =====================================================================
-# PADRÕES DE RENOMEAÇÃO PERSISTENTES (LOAD / SAVE / CRUD)
+# GERENCIAMENTO DE PADRÕES (Persistência Local)
 # =====================================================================
 def load_patterns():
     if not PATTERNS_FILE.exists():
-        default_patterns = {
+        default = {
             "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
-            "COMPANHIA DE AGUA E ESGOTOS DA PARAÍBA": "CAGEPA",
             "CIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
-            "TRANSPORTE LIDA": "TRANSPORTE_LIDA",
-            "UNIPAR CARBOCLORO": "UNIPAR_CARBOCLORO",
-            "EXPRESS TCM": "EXPRESS_TCM",
-            "MDM RENOVADORA DE PNEUS": "MDM_RENOVADORA",
             "COMPANHIA DE AGUAS E ESGOTOS DO RN": "CAERN",
-            "EKIPE TEC DE SEG E INCENDIO": "EKIPE",
             "PETROLEO BRASILEIRO": "PETROBRAS",
-            "INNOVATIVE WATER CARE": "SIGURA",
-            "COMERCIAL E IMPORTADORA DE PNEUS": "CAMPNEUS",
-            "URP CARGAS E LOGISTICA": "URP",
-            "M.F DE MELO FILHO": "MF_DE_MELO",
+            "NEOENERGIA": "NEOENERGIA",
+            "EQUATORIAL": "EQUATORIAL",
         }
-        save_patterns(default_patterns)
-        return default_patterns
+        save_patterns(default)
+        return default
     try:
         with open(PATTERNS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return {str(k): str(v) for k, v in data.items()}
+            return json.load(f)
     except Exception:
         return {}
 
@@ -212,7 +164,7 @@ def save_patterns(pats: dict):
         with open(PATTERNS_FILE, "w", encoding="utf-8") as f:
             json.dump(pats, f, ensure_ascii=False, indent=2)
     except Exception:
-        return
+        pass
 
 
 PATTERNS = load_patterns()
@@ -226,47 +178,25 @@ def normalize_pattern_key(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def add_pattern(raw_pattern: str, substitute: str) -> tuple:
-    raw_pattern = raw_pattern.strip()
-    substitute = substitute.strip()
-    key_norm = normalize_pattern_key(raw_pattern)
-    if not key_norm:
-        return False, "Padrão vazio."
-    for existing in PATTERNS.keys():
-        if normalize_pattern_key(existing) == key_norm:
-            return False, "Conflito: padrão já existe (mesma normalização)."
-    PATTERNS[raw_pattern] = substitute
+def add_pattern(raw, sub):
+    raw, sub = raw.strip(), sub.strip()
+    if not raw or not sub:
+        return False, "Campos vazios."
+    PATTERNS[raw] = sub
     save_patterns(PATTERNS)
-    return True, "Padrão adicionado."
+    return True, "Adicionado."
 
 
-def edit_pattern(old_raw: str, new_raw: str, new_sub: str) -> tuple:
-    old_raw = old_raw.strip()
-    new_raw = new_raw.strip()
-    new_sub = new_sub.strip()
-    if old_raw not in PATTERNS:
-        return False, "Padrão não encontrado."
-    key_norm = normalize_pattern_key(new_raw)
-    for k in PATTERNS.keys():
-        if k != old_raw and normalize_pattern_key(k) == key_norm:
-            return False, "Conflito: outro padrão com mesma normalização."
-    PATTERNS.pop(old_raw)
-    PATTERNS[new_raw] = new_sub
-    save_patterns(PATTERNS)
-    return True, "Padrão editado."
-
-
-def remove_pattern(raw_pattern: str) -> tuple:
-    raw_pattern = raw_pattern.strip()
-    if raw_pattern in PATTERNS:
-        PATTERNS.pop(raw_pattern)
+def remove_pattern(raw):
+    if raw in PATTERNS:
+        PATTERNS.pop(raw)
         save_patterns(PATTERNS)
-        return True, "Removido"
-    return False, "Não achou padrão"
+        return True, "Removido."
+    return False, "Não encontrado."
 
 
 # =====================================================================
-# NORMALIZAÇÃO E SUBSTITUIÇÕES (USADAS NA RENOMEAÇÃO)
+# NORMALIZAÇÃO E LIMPEZA DE TEXTO
 # =====================================================================
 def _normalizar_texto(s: str) -> str:
     if not s:
@@ -279,867 +209,675 @@ def _normalizar_texto(s: str) -> str:
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
+
+    # Regra especial Sabará (exemplo)
     if "SABARA" in nome_norm:
         return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
-    for padrao in sorted(PATTERNS.keys(), key=lambda x: len(x), reverse=True):
+
+    # Busca no dicionário de padrões (do maior para o menor para evitar conflitos parciais)
+    for padrao in sorted(PATTERNS.keys(), key=len, reverse=True):
         if _normalizar_texto(padrao) in nome_norm:
             return PATTERNS[padrao]
+
     return re.sub(r"\s+", "_", nome_norm)
 
 
 def limpar_emitente(nome: str) -> str:
     if not nome:
         return "SEM_NOME"
-    nome = unicodedata.normalize("NFKD", nome).encode("ASCII", "ignore").decode("ASCII")
-    nome = re.sub(r"[^A-Z0-9_]+", "_", nome.upper())
+    nome = re.sub(r"[^A-Z0-9_]+", "_", nome.upper())  # Remove chars especiais
     return re.sub(r"_+", "_", nome).strip("_")
 
 
 def limpar_numero(numero: str) -> str:
     if not numero:
         return "0"
-    numero = re.sub(r"[^\d]", "", str(numero))
-    return numero.lstrip("0") or "0"
+    n = re.sub(r"[^\d]", "", str(numero))
+    return n.lstrip("0") or "0"
 
 
-def validar_e_corrigir_dados(dados):
-    """Valida e corrige dados extraídos da IA"""
-    if not isinstance(dados, dict):
-        dados = {}
-    required_fields = ["emitente", "numero_nota", "cidade"]
-    for field in required_fields:
-        if field not in dados or not dados[field]:
-            dados[field] = "NÃO_IDENTIFICADO"
-    correcoes = {
-        "emitente": {
-            "CPFL ENERGIA": "CPFL",
-            "COMPANHIA PAULISTA DE FORCA E LUZ": "CPFL",
-            "SABARA": "SABARA",
-        }
-    }
-    for field, correcoes_field in correcoes.items():
-        if field in dados:
-            for incorreto, correto in correcoes_field.items():
-                if incorreto in dados[field].upper():
-                    dados[field] = correto
-                    break
-    if "numero_nota" in dados:
-        numero_limpo = re.sub(r"[^\d]", "", str(dados["numero_nota"]))
-        dados["numero_nota"] = numero_limpo if numero_limpo else "000000"
-    return dados
+# =====================================================================
+# CORREÇÃO CRÍTICA: EXTRAÇÃO DE JSON ROBUSTA
+# =====================================================================
+def extrair_json_seguro(texto: str):
+    """Tenta extrair JSON válido de respostas 'chatas' do LLM usando Regex."""
+    if texto is None:
+        return []
+    texto = texto.strip()
+
+    # 1. Tenta encontrar um bloco de Array [...], preferencialmente mais externo
+    match_array = re.search(r'\[.*\]', texto, re.DOTALL)
+    if match_array:
+        try:
+            return json.loads(match_array.group())
+        except Exception:
+            pass  # Falha no parse, tenta fallback
+
+    # 2. Tenta encontrar um bloco de Objeto {...} (caso retorne só um)
+    match_obj = re.search(r'\{.*\}', texto, re.DOTALL)
+    if match_obj:
+        try:
+            return [json.loads(match_obj.group())]  # Encapsula em lista
+        except Exception:
+            pass
+
+    # 3. Fallback: limpeza de markdown simples e tentativa direta
+    clean = texto.replace("```json", "").replace("```", "").strip()
+    try:
+        parsed = json.loads(clean)
+        # Se for dict -> encapsula
+        if isinstance(parsed, dict):
+            return [parsed]
+        return parsed
+    except Exception:
+        # último recurso: tentar extrair objetos sequenciais com regex simples
+        objs = re.findall(r'\{[^{}]+\}', clean)
+        results = []
+        for o in objs:
+            try:
+                results.append(json.loads(o))
+            except Exception:
+                continue
+        return results
 
 
 # =====================================================================
 # CONFIGURAÇÃO GEMINI
 # =====================================================================
+# Prioridade: st.secrets > Variável de Ambiente
 if hasattr(st, "secrets") and st.secrets.get("GOOGLE_API_KEY"):
     GEMINI_API_KEY = st.secrets["GOOGLE_API_KEY"]
 else:
     GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 if not GEMINI_API_KEY:
-    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
+    st.error("❌ Chave GOOGLE_API_KEY não encontrada. Configure no .env ou st.secrets.")
     st.stop()
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
-    st.sidebar.success("✅ Gemini configurado")
+    # Modelo flash é mais rápido e barato para OCR simples
+    model = genai.GenerativeModel(
+        "models/gemini-2.0-flash-exp" if os.getenv("USE_BETA") else "models/gemini-1.5-flash"
+    )
+    st.sidebar.success("✅ Gemini Ativo")
 except Exception as e:
-    st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
+    st.error(f"❌ Erro Gemini: {str(e)}")
     st.stop()
 
 
 # =====================================================================
-# FUNÇÕES DE RETRY E PROCESSAMENTO INDIVIDUAL
+# LÓGICA DE PROCESSAMENTO (WORKER)
 # =====================================================================
-def calcular_delay(tentativa, error_msg):
-    """Cálculo de delay seguro para Streamlit Cloud."""
-    base = MIN_RETRY_DELAY * (tentativa + 1)
-    if not error_msg:
-        return min(base, MAX_RETRY_DELAY)
+def calcular_backoff(tentativa, erro_str):
+    """Calcula tempo de espera baseado no erro."""
     try:
-        em = (error_msg or "").lower()
+        base = MIN_RETRY_DELAY * (tentativa + 1)
+        es = (erro_str or "").lower()
+        if "429" in es or "resourceexhausted" in es or "rate" in es:
+            return min(base + 5, MAX_RETRY_DELAY)
+        return min(base, MAX_RETRY_DELAY)
     except Exception:
-        em = ""
-    if "retry in" in em:
-        try:
-            seg = float(re.search(r"retry in (\d+\.?\d*)s", em).group(1))
-            return min(seg + 2, MAX_RETRY_DELAY)
-        except Exception:
-            pass
-    return min(base, MAX_RETRY_DELAY)
+        return MIN_RETRY_DELAY
 
 
-def processar_pagina_gemini_single(prompt_instrucao: str, page_bytes: bytes, timeout: int = 60):
-    """Processa uma página com retry. Retorna (dados, ok, tempo, provider)."""
-    for tentativa in range(MAX_RETRIES + 1):
-        try:
-            start = time.time()
-            resp = model.generate_content(
-                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_bytes}],
-                generation_config={"response_mime_type": "application/json"},
-                request_options={"timeout": timeout},
-            )
-            tempo = round(time.time() - start, 2)
+def processar_arquivo_worker(arquivo_dados, use_cache, batch_size=BATCH_SIZE_DEFAULT):
+    """
+    Função isolada para processar UM arquivo PDF inteiro.
+    Executada dentro de uma Thread.
+    Retorna dicionário com 'name', 'results' (lista por página), 'bytes_originais', 'cached' (bool) e 'logs' (lista).
+    """
+    fname = arquivo_dados["name"]
+    file_bytes = arquivo_dados["bytes"]
+    logs_local = []
 
-            texto = (resp.text or "").strip()
-            if texto.startswith("```"):
-                texto = texto.replace("```json", "").replace("```", "").strip()
+    try:
+        reader = PdfReader(io.BytesIO(file_bytes))
+        num_pages = len(reader.pages)
+    except Exception as e:
+        return {"error": f"PDF Corrompido: {str(e)}", "name": fname, "results": [], "bytes_originais": file_bytes, "logs": [f"PDF corrompido: {e}"]}
 
-            try:
-                dados = json.loads(texto)
-            except Exception:
-                dados = {"error": "Resposta não era JSON válido", "_raw": texto[:600]}
-
-            return dados, True, tempo, "Gemini"
-
-        except ResourceExhausted as e:
-            delay = calcular_delay(tentativa, str(e))
-            time.sleep(delay)
-
-        except Exception as e:
-            if tentativa < MAX_RETRIES:
-                time.sleep(MIN_RETRY_DELAY)
-            else:
-                return {"error": str(e)}, False, 0, "Gemini"
-
-    return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
-
-
-# =====================================================================
-# SIDEBAR: Configurações + UI de Padrões
-# =====================================================================
-with st.sidebar:
-    st.markdown("### 🔧 Configurações")
-    use_cache = st.checkbox("Usar Cache", value=True)
-
-    st.markdown("#### Threads (Turbo Seguro)")
-    worker_count = st.number_input(
-        "Workers",
-        min_value=1,
-        max_value=8,
-        value=MAX_WORKERS_DEFAULT,
-        step=1,
-    )
-
-    st.markdown("---")
-    st.markdown("### 🧩 Padrões de Renomeação")
-
-    with st.expander("📋 Ver padrões existentes"):
-        for k, v in PATTERNS.items():
-            st.markdown(f"- `{k}` → `{v}`")
-
-    st.markdown("**Adicionar novo padrão**")
-    new_pat_raw = st.text_input("Texto a reconhecer", key="new_pat_raw")
-    new_pat_sub = st.text_input("Substituto", key="new_pat_sub")
-
-    if st.button("➕ Adicionar padrão"):
-        if new_pat_raw and new_pat_sub:
-            ok, msg = add_pattern(new_pat_raw, new_pat_sub)
-            if ok:
-                st.success(msg)
-                time.sleep(0.12)
-                st.rerun()
-            else:
-                st.warning(msg)
-        else:
-            st.warning("Preencha ambos os campos")
-
-    st.markdown("**Editar / Excluir**")
-    edit_sel = st.selectbox("Selecione um padrão", [""] + list(PATTERNS.keys()))
-
-    if edit_sel:
-        col_e1, col_e2 = st.columns([2, 1])
-        with col_e1:
-            edit_raw = st.text_input("Padrão", value=edit_sel)
-            edit_sub = st.text_input("Substituto", value=PATTERNS.get(edit_sel, ""))
-
-        with col_e2:
-            if st.button("✏️ Salvar"):
-                ok, msg = edit_pattern(edit_sel, edit_raw, edit_sub)
-                if ok:
-                    st.success(msg)
-                    time.sleep(0.12)
-                    st.rerun()
-                else:
-                    st.warning(msg)
-
-            if st.button("🗑️ Excluir"):
-                ok, msg = remove_pattern(edit_sel)
-                if ok:
-                    st.success(msg)
-                    time.sleep(0.12)
-                    st.rerun()
-                else:
-                    st.warning(msg)
-
-    st.markdown("---")
-    if st.button("🧹 Limpar cache"):
-        document_cache.clear()
-        st.success("Cache limpo!")
-        time.sleep(0.12)
-        st.rerun()
-
-
-# =====================================================================
-# DASHBOARD ANALÍTICO
-# =====================================================================
-def criar_dashboard_analitico():
-    if "resultados" not in st.session_state:
-        return
-
-    st.markdown("---")
-    st.markdown("### 📊 Dashboard Analítico")
-
-    resultados = st.session_state["resultados"]
-    logs = st.session_state.get("processed_logs", [])
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric("📁 Arquivos", len(resultados))
-
-    with col2:
-        total_paginas = sum(r.get("pages", 1) for r in resultados)
-        st.metric("📄 Páginas", total_paginas)
-
-    with col3:
-        sucessos = len([log for log in logs if log[2] == "OK"])
-        st.metric("✅ Sucessos", sucessos)
-
-    with col4:
-        erros = len([log for log in logs if log[2] != "OK"])
-        st.metric("❌ Erros", erros)
-
-    if resultados:
-        st.markdown("#### 📈 Emitentes mais frequentes")
-        emitentes = {}
-        for r in resultados:
-            em = r.get("emitente", "Desconhecido")
-            emitentes[em] = emitentes.get(em, 0) + 1
-
-        for em, qtd in sorted(emitentes.items(), key=lambda x: x[1], reverse=True)[:5]:
-            st.write(f"`{em}`: {qtd} doc(s)")
-
-
-# =====================================================================
-# UPLOAD + PROCESSAMENTO MULTITHREAD POR PÁGINA (OPÇÃO A — TURBO)
-# =====================================================================
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown("### 📎 Enviar PDFs e processar")
-
-uploaded_files = st.file_uploader(
-    "Selecione arquivos PDF",
-    type=["pdf"],
-    accept_multiple_files=True,
-    key="uploader",
-)
-
-col_up_a, col_up_b = st.columns([1, 1])
-with col_up_a:
-    process_btn = st.button("🚀 Processar PDFs")
-with col_up_b:
-    clear_session = st.button("♻️ Limpar sessão")
-
-st.markdown("</div>", unsafe_allow_html=True)
-
-# ---------------------------------------------------------------------
-# LIMPAR SESSÃO
-# ---------------------------------------------------------------------
-if clear_session:
-    if "session_folder" in st.session_state:
-        try:
-            shutil.rmtree(st.session_state["session_folder"])
-        except Exception:
-            pass
-
-    for k in [
-        "resultados",
-        "session_folder",
-        "novos_nomes",
-        "processed_logs",
-        "files_meta",
-        "selected_files",
-        "_manage_target",
-    ]:
-        st.session_state.pop(k, None)
-
-    st.success("Sessão limpa.")
-    time.sleep(0.12)
-    st.rerun()
-
-# ---------------------------------------------------------------------
-# PROCESSAMENTO — TURBO v4 (Batch 8 + fallback por página)
-# ---------------------------------------------------------------------
-if uploaded_files and process_btn:
-
-    BATCH_SIZE = 8   # número de páginas por lote
-    session_id = str(uuid.uuid4())
-    session_folder = TEMP_FOLDER / session_id
-    session_folder.mkdir(exist_ok=True)
-
-    arquivos = []
-    total_paginas = 0
-
-    # -----------------------------
-    # Ler PDFs e contar páginas
-    # -----------------------------
-    for f in uploaded_files:
-        try:
-            b = f.read()
-            reader = PdfReader(io.BytesIO(b))
-            n_pages = len(reader.pages)
-            total_paginas += n_pages
-
-            arquivos.append({
-                "name": f.name,
-                "bytes": b,
-                "reader": reader,
-                "pages": n_pages
-            })
-
-        except Exception:
-            st.warning(f"❌ Erro ao abrir {f.name}, ignorado.")
-
-    st.info(f"📄 Total de páginas a processar: **{total_paginas}**")
-
-    # -----------------------------
-    # Preparação
-    # -----------------------------
-    agrupados_bytes = {}
-    processed_logs = []
-
-    progresso = 0
-    progress_bar = st.progress(0.0)
-    progresso_text = st.empty()
-
-    start_all = time.time()
-
+    # Prompt otimizado (batch)
     prompt_batch = (
-        "Analise todas as páginas enviadas. "
-        "Para cada página, extraia: emitente, número da nota e cidade. "
-        "Responda exclusivamente um JSON ARRAY no formato:\n"
-        "[{\"pagina\":1, \"emitente\":\"NOME\", \"numero_nota\":\"NUM\", \"cidade\":\"CIDADE\"}, ...]"
+        "Analise as páginas da nota fiscal. Para cada página extraia: pagina (numero da página na ordem do input, começando em 1), "
+        "emitente (nome da empresa/fornecedor ou null), numero_nota (apenas dígitos ou null), cidade (município ou null). "
+        "Se não achar um campo, retorne null nesse campo. Retorne APENAS um JSON ARRAY: "
+        "[{\"pagina\": 1, \"emitente\": \"...\", \"numero_nota\": \"...\", \"cidade\": \"...\"}, ...]"
     )
 
-    # -----------------------------------------------------------
-    # Função auxiliar: montar batch
-    # -----------------------------------------------------------
-    def montar_lote(reader, start_page, BATCH_SIZE):
-        paginas = []
-        final = min(start_page + BATCH_SIZE, len(reader.pages))
-        for i in range(start_page, final):
+    # Cache global por arquivo + prompt
+    cache_key = document_cache.get_cache_key_file(file_bytes, prompt_batch)
+    if use_cache:
+        cached_data = document_cache.get(cache_key)
+        if cached_data:
+            return {"name": fname, "results": cached_data, "bytes_originais": file_bytes, "cached": True, "logs": ["cache_hit"]}
+
+    page_results = [None] * num_pages
+
+    current_page = 0
+    while current_page < num_pages:
+        end_page = min(current_page + batch_size, num_pages)
+        batch_images = []
+        indices_lote = []
+
+        # montar lote
+        for i in range(current_page, end_page):
             buf = io.BytesIO()
             w = PdfWriter()
             w.add_page(reader.pages[i])
             w.write(buf)
-            paginas.append((i, buf.getvalue()))
-        return paginas
+            batch_images.append({"mime_type": "application/pdf", "data": buf.getvalue()})
+            indices_lote.append(i)
 
-    # -----------------------------------------------------------
-    # Loop dos arquivos
-    # -----------------------------------------------------------
-    for arquivo in arquivos:
+        # tentativa do lote com retry
+        sucesso_lote = False
+        extracted_data = []
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = model.generate_content(
+                    [prompt_batch] + batch_images,
+                    generation_config={"response_mime_type": "application/json"},
+                    request_options={"timeout": 90},
+                )
+                extracted_data = extrair_json_seguro(response.text)
+                sucesso_lote = True
+                logs_local.append(f"{fname} lote {current_page+1}-{end_page} OK (attempt {attempt})")
+                break
+            except Exception as e:
+                back = calcular_backoff(attempt, str(e))
+                logs_local.append(f"{fname} lote {current_page+1}-{end_page} erro: {e} -> backoff {back}s (attempt {attempt})")
+                time.sleep(back)
 
-        fname = arquivo["name"]
-        reader = arquivo["reader"]
-        file_bytes = arquivo["bytes"]
-        n_pages = arquivo["pages"]
-
-        cache_key = document_cache.get_cache_key_file(file_bytes, prompt_batch)
-        cached = document_cache.get(cache_key) if use_cache else None
-
-        if cached:
-            page_results_final = cached.get("page_results", [])
-        else:
-            page_results_final = [None] * n_pages
-
-            pagina_atual = 0
-
-            # -----------------------------------------
-            # PROCESSAR EM BATCHES
-            # -----------------------------------------
-            while pagina_atual < n_pages:
-                lote = montar_lote(reader, pagina_atual, BATCH_SIZE)
-
-                # chamada única ao Gemini para até 8 páginas
-                try:
-                    start = time.time()
-                    resp = model.generate_content(
-                        [prompt_batch] + [
-                            {"mime_type": "application/pdf", "data": x[1]}
-                            for x in lote
-                        ],
-                        generation_config={"response_mime_type": "application/json"},
-                        request_options={"timeout": 90}
-                    )
-                    tempo_batch = round(time.time() - start, 2)
-                    txt = resp.text.strip()
-
-                    if txt.startswith("```"):
-                        txt = txt.replace("```json", "").replace("```", "").strip()
-
+        # mapeamento perfeito das respostas do lote
+        if sucesso_lote and isinstance(extracted_data, list) and len(extracted_data) > 0:
+            mapped = False
+            # 1) tenta mapear pelo campo 'pagina'
+            for dados in extracted_data:
+                if not isinstance(dados, dict):
+                    continue
+                if "pagina" in dados:
                     try:
-                        arr = json.loads(txt)
-                    except:
-                        arr = []
+                        pag_json = int(dados["pagina"]) - 1
+                        if pag_json in indices_lote:
+                            # se já houver dados naquele index, devemos agregar (não sobrescrever)
+                            existing = page_results[pag_json]
+                            if existing and isinstance(existing, dict):
+                                # merge/aggregate: prefer números e emitente não-nulo
+                                merged = existing.copy()
+                                for k, v in dados.items():
+                                    if v and (not merged.get(k)):
+                                        merged[k] = v
+                                page_results[pag_json] = merged
+                            else:
+                                page_results[pag_json] = dados
+                            mapped = True
+                    except Exception:
+                        continue
 
-                    # mapear retorno
-                    mapping = {}
-                    for item in arr:
-                        pg = item.get("pagina")
-                        if isinstance(pg, int):
-                            mapping[pg - 1] = item
-
-                    # aplicar resultados
-                    for (pg_index, _bytes) in lote:
-                        if pg_index in mapping:
-                            item = mapping[pg_index]
-                            page_results_final[pg_index] = (
-                                item,
-                                True,
-                                tempo_batch,
-                                "Gemini-Batch"
-                            )
+            # 2) se nada mapeou, mapear pela ordem de aparição
+            if not mapped:
+                for idx_relativo, dados_pagina in enumerate(extracted_data):
+                    if idx_relativo < len(indices_lote):
+                        real_idx = indices_lote[idx_relativo]
+                        existing = page_results[real_idx]
+                        if existing and isinstance(existing, dict):
+                            merged = existing.copy()
+                            if isinstance(dados_pagina, dict):
+                                for k, v in dados_pagina.items():
+                                    if v and (not merged.get(k)):
+                                        merged[k] = v
+                                page_results[real_idx] = merged
                         else:
-                            # marcar como precisando fallback
-                            page_results_final[pg_index] = None
+                            page_results[real_idx] = dados_pagina
 
-                except Exception as e:
-                    # lote inteiro falhou → todas vão para fallback
-                    for (pg_index, _) in lote:
-                        page_results_final[pg_index] = None
+        else:
+            if not sucesso_lote:
+                logs_local.append(f"{fname} lote {current_page+1}-{end_page} falhou todas tentativas.")
+            else:
+                logs_local.append(f"{fname} lote {current_page+1}-{end_page} retornou vazio/malformed JSON.")
 
-                pagina_atual += BATCH_SIZE
+        # FALLBACK INDIVIDUAL para páginas que ficaram sem resultado
+        for idx in indices_lote:
+            if page_results[idx] is None:
+                # tentar processamento por página com retry
+                pagina_buf = io.BytesIO()
+                w_single = PdfWriter()
+                w_single.add_page(reader.pages[idx])
+                w_single.write(pagina_buf)
 
-            # -------------------------------------------------------------
-            # FALLBACK TIPO 1 — APENAS páginas falhas vão para retry único
-            # -------------------------------------------------------------
-            for i in range(n_pages):
-                if page_results_final[i] is None:
-                    # processar página individual
-                    buf = io.BytesIO()
-                    w = PdfWriter()
-                    w.add_page(reader.pages[i])
-                    w.write(buf)
-                    pbytes = buf.getvalue()
-
-                    dados, ok, tempo, provider = processar_pagina_gemini_single(
-                        prompt_batch, pbytes
-                    )
-                    page_results_final[i] = (dados, ok, tempo, provider)
-
-            # salvar em cache
-            if use_cache:
-                document_cache.set(cache_key, {
-                    "page_results": page_results_final,
-                    "generated_at": time.time()
-                })
-
-        # -----------------------------------------------------------
-        # PROCESSAR RESPOSTAS INDIVIDUAIS
-        # -----------------------------------------------------------
-        for page_idx, result in enumerate(page_results_final):
-
-            if result is None:
-                processed_logs.append(
-                    (f"{fname} (pág {page_idx+1})", 0, "ERRO_IA", "Sem resposta", "Gemini")
+                prompt_single = (
+                    "Extraia emitente, numero_nota e cidade desta única página. "
+                    "Retorne APENAS um JSON: {\"emitente\": \"...\", \"numero_nota\": \"...\", \"cidade\": \"...\"} "
+                    "Se não achar, use null."
                 )
-                progresso += 1
-                progress_bar.progress(progresso / total_paginas)
-                continue
 
-            dados, ok, tempo, provider = result
-            page_label = f"{fname} (pág {page_idx+1})"
+                single_ok = False
+                for attempt in range(MAX_RETRIES + 1):
+                    try:
+                        resp_single = model.generate_content(
+                            [prompt_single, {"mime_type": "application/pdf", "data": pagina_buf.getvalue()}],
+                            generation_config={"response_mime_type": "application/json"},
+                            request_options={"timeout": 60},
+                        )
+                        dados_single_arr = extrair_json_seguro(resp_single.text)
+                        # extrair_json_seguro pode retornar lista; pega primeiro dict
+                        if isinstance(dados_single_arr, list) and len(dados_single_arr) >= 1:
+                            dados_single = dados_single_arr[0]
+                        elif isinstance(dados_single_arr, dict):
+                            dados_single = dados_single_arr
+                        else:
+                            dados_single = None
 
-            if not ok or "error" in dados:
-                processed_logs.append(
-                    (page_label, tempo, "ERRO_IA", dados.get("error", "erro"), provider)
-                )
-                progresso += 1
-                progress_bar.progress(progresso / total_paginas)
-                continue
+                        if isinstance(dados_single, dict):
+                            # adiciona campo 'pagina' para consistência
+                            try:
+                                dados_single["pagina"] = idx + 1
+                            except Exception:
+                                pass
+                            page_results[idx] = dados_single
+                            logs_local.append(f"{fname} página {idx+1} fallback OK (attempt {attempt})")
+                            single_ok = True
+                            break
+                        else:
+                            logs_local.append(f"{fname} página {idx+1} fallback retornou vazio (attempt {attempt})")
+                    except Exception as e:
+                        back = calcular_backoff(attempt, str(e))
+                        logs_local.append(f"{fname} página {idx+1} fallback erro: {e} -> backoff {back}s (attempt {attempt})")
+                        time.sleep(back)
 
-            dados = validar_e_corrigir_dados(dados)
+                if not single_ok:
+                    page_results[idx] = None
+                    logs_local.append(f"{fname} página {idx+1} fallback FAILED após retries.")
 
-            emit_raw = dados.get("emitente", "")
-            num_raw = dados.get("numero_nota", "")
-            cid_raw = dados.get("cidade", "")
+        current_page += batch_size
 
-            numero = limpar_numero(num_raw)
-            nome_map = substituir_nome_emitente(emit_raw, cid_raw)
-            emitente = limpar_emitente(nome_map)
+    # salvar no cache
+    if use_cache:
+        try:
+            document_cache.set(cache_key, page_results)
+        except Exception:
+            logs_local.append("Erro ao gravar cache (ignorado).")
 
-            key = (numero, emitente)
-            if key not in agrupados_bytes:
-                agrupados_bytes[key] = []
+    return {"name": fname, "results": page_results, "bytes_originais": file_bytes, "cached": False, "logs": logs_local}
 
-            agrupados_bytes[key].append({
-                "arquivo": fname,
-                "pagina": page_idx
-            })
 
-            processed_logs.append(
-                (page_label, tempo, "OK", f"{numero}/{emitente}", provider)
-            )
+# =====================================================================
+# INTERFACE SIDEBAR
+# =====================================================================
+with st.sidebar:
+    st.header("⚙️ Configuração")
+    use_cache = st.checkbox("Usar Cache", value=True)
 
-            progresso += 1
-            progress_bar.progress(progresso / total_paginas)
+    st.subheader("Performance")
+    workers = st.slider("Processos Simultâneos", 1, 8, MAX_WORKERS_DEFAULT, help="Aumente se tiver muitos arquivos.")
 
-    # =====================================================================
-    # GERAR PDFs FINAIS AGRUPADOS — (idêntico ao seu)
-    # =====================================================================
-    resultados = []
-    files_meta = {}
-    arquivos_map = {a["name"]: a["bytes"] for a in arquivos}
+    st.markdown("---")
+    st.subheader("📝 Padrões de Renomeação")
 
-    for (numero, emitente), lista_paginas in agrupados_bytes.items():
+    with st.expander("Ver/Adicionar Padrões"):
+        new_k = st.text_input("Texto na Nota (ex: COMPANHIA XYZ)")
+        new_v = st.text_input("Substituto (ex: XYZ)")
+        if st.button("➕ Adicionar"):
+            ok, msg = add_pattern(new_k, new_v)
+            if ok:
+                st.success(msg)
+            else:
+                st.warning(msg)
+            st.rerun()
 
-        if not numero or numero == "0":
-            continue
+        st.write("---")
+        for k, v in PATTERNS.items():
+            col_del, col_txt = st.columns([1, 4])
+            with col_del:
+                if st.button("🗑️", key=f"del_{k}"):
+                    remove_pattern(k)
+                    st.rerun()
+            with col_txt:
+                st.code(f"{k} -> {v}", language="text")
 
-        writer = PdfWriter()
-        count_added = 0
+    st.markdown("---")
+    if st.button("🧹 Limpar Cache"):
+        document_cache.clear()
+        st.success("Cache limpo.")
 
-        for item in lista_paginas:
-            orig = item["arquivo"]
-            pg = item["pagina"]
+
+# =====================================================================
+# MAIN APP
+# =====================================================================
+
+# Aviso de Volatilidade (Crítico para Cloud)
+st.markdown(
+    """
+    <div class="warning-box">
+        <b>⚠️ Atenção (Modo Nuvem):</b> Arquivos e Padrões novos são temporários. 
+        Se reiniciar a página, <b>exporte seus padrões</b> no final da página para não perdê-los.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# --- Split de páginas (UI) ---
+st.markdown("### ✂️ Separação de páginas (Split)")
+split_pdf = st.file_uploader("PDF para separar páginas", type=["pdf"], key="split_pdf")
+if split_pdf:
+    pages_to_extract = st.text_input("Páginas (ex: 1,2,5-8):", key="split_pages_input")
+    if st.button("Separar", key="split_btn"):
+        try:
+            reader = PdfReader(split_pdf)
+            n_pages = len(reader.pages)
+            pages_list = []
+            for part in pages_to_extract.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                if "-" in part:
+                    parts = part.split("-")
+                    if len(parts) == 2:
+                        a = int(parts[0])
+                        b = int(parts[1])
+                        pages_list.extend(list(range(a, b + 1)))
+                else:
+                    pages_list.append(int(part))
+
+            writer = PdfWriter()
+            added = 0
+            for p in pages_list:
+                if 1 <= p <= n_pages:
+                    writer.add_page(reader.pages[p - 1])
+                    added += 1
+
+            if added == 0:
+                st.warning("Nenhuma página válida informada.")
+            else:
+                out = io.BytesIO()
+                writer.write(out)
+                out.seek(0)
+                st.download_button("⬇️ Baixar PDF Separado", out, "separado.pdf", mime="application/pdf")
+                st.success(f"Arquivo gerado ({added} páginas).")
+        except Exception as e:
+            st.error(f"Erro: {e}")
+
+# --- Agrupamento manual (UI) ---
+st.markdown("### 🔗 Agrupar PDFs manualmente")
+group_files = st.file_uploader("Selecione PDFs a combinar", type=["pdf"], accept_multiple_files=True, key="group_files")
+if group_files:
+    if st.button("Agrupar PDFs", key="btn_group"):
+        try:
+            writer = PdfWriter()
+            for f in group_files:
+                r_g = PdfReader(f)
+                for p in r_g.pages:
+                    writer.add_page(p)
+            out = io.BytesIO()
+            writer.write(out)
+            out.seek(0)
+            st.download_button("⬇️ Baixar PDF Agrupado", out, "agrupado.pdf", mime="application/pdf")
+        except Exception as e:
+            st.error(f"Erro ao agrupar: {e}")
+
+# --- Uploads e processamento ---
+uploaded_files = st.file_uploader("Selecione seus PDFs", type=["pdf"], accept_multiple_files=True)
+
+col_act1, col_act2 = st.columns([1, 4])
+with col_act1:
+    btn_processar = st.button("🚀 Processar Tudo", type="primary")
+with col_act2:
+    if st.button("♻️ Resetar"):
+        st.session_state.clear()
+        st.rerun()
+
+if uploaded_files and btn_processar:
+    session_id = str(uuid.uuid4())
+    session_path = TEMP_FOLDER / session_id
+    session_path.mkdir(exist_ok=True)
+
+    st.session_state["session_path"] = str(session_path)
+
+    # Preparar dados para threads
+    files_data = []
+    for f in uploaded_files:
+        files_data.append({"name": f.name, "bytes": f.read()})
+
+    total_files = len(files_data)
+    completed = 0
+    prog_bar = st.progress(0)
+    status_txt = st.empty()
+
+    all_results_grouped = {}  # Chave: (numero, emitente), Valor: [paginas...]
+    logs_processamento = []
+
+    start_time = time.time()
+
+    # --- PARALELISMO REAL ---
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(processar_arquivo_worker, f, use_cache, BATCH_SIZE_DEFAULT): f["name"] for f in files_data}
+
+        for future in as_completed(futures):
+            f_name = futures[future]
+            completed += 1
+            prog_bar.progress(completed / total_files)
+            status_txt.text(f"Processando {completed}/{total_files}: {f_name}")
 
             try:
-                r = PdfReader(io.BytesIO(arquivos_map[orig]))
-                writer.add_page(r.pages[pg])
-                count_added += 1
-            except:
-                continue
+                res = future.result()
 
-        if count_added == 0:
+                if "error" in res:
+                    logs_processamento.append(f"❌ {f_name}: {res['error']}")
+                    # também inclui logs locais se houver
+                    if res.get("logs"):
+                        logs_processamento.extend([f"{f_name} LOG: {l}" for l in res["logs"]])
+                    continue
+
+                # Processar resultados da thread
+                original_bytes = res["bytes_originais"]
+                paginas_res = res["results"] or []
+                logs_local = res.get("logs", [])
+                if logs_local:
+                    logs_processamento.extend([f"{f_name} LOG: {l}" for l in logs_local])
+
+                # Abrir reader novamente apenas para extração
+                reader_local = PdfReader(io.BytesIO(original_bytes))
+
+                for idx_pg, dados_pg in enumerate(paginas_res):
+                    if not dados_pg:
+                        logs_processamento.append(f"⚠️ {f_name} Pág {idx_pg+1}: Sem dados IA")
+                        continue
+
+                    # Normalização
+                    raw_emit = (dados_pg.get("emitente") or "") if isinstance(dados_pg, dict) else ""
+                    raw_num = (dados_pg.get("numero_nota") or "") if isinstance(dados_pg, dict) else ""
+                    raw_cid = (dados_pg.get("cidade") or "") if isinstance(dados_pg, dict) else ""
+
+                    if not raw_emit and not raw_num:
+                        # ignora se nada útil
+                        continue
+
+                    emit_final = limpar_emitente(substituir_nome_emitente(raw_emit, raw_cid))
+                    num_final = limpar_numero(raw_num)
+
+                    key = (num_final, emit_final)
+                    if key not in all_results_grouped:
+                        all_results_grouped[key] = []
+
+                    # Guarda buffer da página específica
+                    try:
+                        buf_pg = io.BytesIO()
+                        w_pg = PdfWriter()
+                        # garante que página existe
+                        if idx_pg < len(reader_local.pages):
+                            w_pg.add_page(reader_local.pages[idx_pg])
+                            w_pg.write(buf_pg)
+                            all_results_grouped[key].append({
+                                "data": buf_pg.getvalue(),
+                                "origem": f_name,
+                                "pagina_origem": idx_pg + 1
+                            })
+                        else:
+                            logs_processamento.append(f"⚠️ {f_name} página {idx_pg+1} index out of range (ignorado).")
+                    except Exception as e:
+                        logs_processamento.append(f"❌ Erro ao extrair página {idx_pg+1} de {f_name}: {e}")
+
+            except Exception as e:
+                logs_processamento.append(f"❌ Erro fatal em {f_name}: {str(e)}")
+
+    # --- GERAÇÃO DOS ARQUIVOS FINAIS (agrupando corretamente) ---
+    status_txt.text("Gerando arquivos finais...")
+
+    final_files_meta = []
+
+    for (num, emit), paginas in all_results_grouped.items():
+        if num == "0":
             continue
 
-        nome_pdf = f"DOC {numero}_{emitente}.pdf"
-        path_out = session_folder / nome_pdf
+        # ordenar páginas por origem->pagina_origem para manter sequência natural
+        try:
+            paginas_sorted = sorted(paginas, key=lambda x: (x.get("origem", ""), x.get("pagina_origem", 0)))
+        except Exception:
+            paginas_sorted = paginas
 
-        with open(path_out, "wb") as f_out:
-            writer.write(f_out)
+        writer_final = PdfWriter()
+        for p in paginas_sorted:
+            try:
+                r_temp = PdfReader(io.BytesIO(p["data"]))
+                writer_final.add_page(r_temp.pages[0])
+            except Exception:
+                continue
 
-        resultados.append({
-            "file": nome_pdf,
-            "numero": numero,
-            "emitente": emitente,
-            "pages": count_added
-        })
+        base_name = f"DOC {num}_{emit}"
+        nome_arq = base_name + ".pdf"
+        caminho_final = session_path / nome_arq
 
-        files_meta[nome_pdf] = {
-            "numero": numero,
-            "emitente": emitente,
-            "pages": count_added
-        }
+        # Se já existir → acrescenta sufixo incremental (não sobrescreve)
+        contador = 2
+        while caminho_final.exists():
+            nome_arq = f"{base_name}_{contador}.pdf"
+            caminho_final = session_path / nome_arq
+            contador += 1
 
-    # =====================================================================
-    # SALVAR ESTADO
-    # =====================================================================
-    st.session_state["resultados"] = resultados
-    st.session_state["session_folder"] = str(session_folder)
-    st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
-    st.session_state["processed_logs"] = processed_logs
-    st.session_state["files_meta"] = files_meta
+        try:
+            with open(caminho_final, "wb") as f_out:
+                writer_final.write(f_out)
 
-    st.success(
-        f"🚀 Processamento Turbo v4 concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados."
-    )
+            final_files_meta.append({
+                "file_name": nome_arq,
+                "path": str(caminho_final),
+                "pages": len(paginas_sorted),
+                "origem": ", ".join(sorted(set([p["origem"] for p in paginas_sorted])))
+            })
+        except Exception as e:
+            logs_processamento.append(f"❌ Erro ao escrever {nome_arq}: {e}")
 
-    criar_dashboard_analitico()
-    time.sleep(0.15)
+    st.session_state["final_results"] = final_files_meta
+    st.session_state["logs"] = logs_processamento
+
+    tempo_total = round(time.time() - start_time, 2)
+    st.success(f"Concluído em {tempo_total}s! {len(final_files_meta)} documentos gerados.")
     st.rerun()
 
 # =====================================================================
-# PAINEL FINAL DE ARQUIVOS GERADOS
+# ÁREA DE RESULTADOS (PÓS-PROCESSAMENTO)
 # =====================================================================
-if "session_folder" in st.session_state and "resultados" in st.session_state:
-
+if "final_results" in st.session_state:
     st.markdown("---")
-    st.header("📁 Arquivos Gerados")
+    st.header("📂 Arquivos Gerados")
 
-    session_folder = Path(st.session_state["session_folder"])
-    resultados = st.session_state["resultados"]
-    novos_nomes = st.session_state["novos_nomes"]
-    files_meta = st.session_state["files_meta"]
+    results = st.session_state["final_results"]
+    logs = st.session_state.get("logs", [])
 
-    if not session_folder.exists():
-        st.error("❌ Pasta da sessão não existe mais.")
-        st.stop()
+    # Dashboard Mini
+    c1, c2 = st.columns(2)
+    c1.metric("Documentos", len(results))
+    c2.metric("Erros/Alertas", len(logs))
 
-    # --------------------------
-    # LISTA DOS ARQUIVOS
-    # --------------------------
-    for idx, r in enumerate(resultados):
+    if logs:
+        with st.expander("Ver Logs de Erro"):
+            for l in logs:
+                st.write(l)
 
-        old_name = r["file"]
-        new_name = novos_nomes.get(old_name, old_name)
-        file_path = session_folder / old_name
+    # Lista de Arquivos
+    for idx, item in enumerate(results):
+        fpath = Path(item["path"])
+        if not fpath.exists():
+            continue
 
-        card_css = f"""
-        <div class="card" style="margin-top:10px;border-left:4px solid #0f4c81;">
-            <div style="font-weight:600;font-size:18px;">📄 {old_name}</div>
-        """
-        st.markdown(card_css, unsafe_allow_html=True)
-
-        colA, colB, colC = st.columns([3, 3, 1])
-
-        # --------------------------
-        # RENOMEAÇÃO
-        # --------------------------
-        with colA:
-            new_name_input = st.text_input(f"Novo nome para {old_name}", value=new_name, key=f"name_{idx}")
-
-        with colB:
-            if st.button("💾 Salvar nome", key=f"save_{idx}"):
-                if new_name_input.strip():
-                    novos_nomes[old_name] = new_name_input.strip()
-                    st.session_state["novos_nomes"] = novos_nomes
-                    st.success("Nome atualizado!")
-                    time.sleep(0.08)
-                    st.rerun()
-
-        # --------------------------
-        # AÇÕES DO ARQUIVO
-        # --------------------------
-        with colC:
-            if st.button("🗑️", key=f"del_{idx}"):
-                try:
-                    os.remove(file_path)
-                except Exception:
-                    pass
-                resultados = [x for x in resultados if x["file"] != old_name]
-                st.session_state["resultados"] = resultados
-                novos_nomes.pop(old_name, None)
-                st.success("Arquivo excluído.")
-                time.sleep(0.08)
-                st.rerun()
-
-        # --------------------------
-        # PREVIEW + DOWNLOAD
-        # --------------------------
-        colD, colE = st.columns([1, 5])
-
-        with colD:
-            try:
-                with open(file_path, "rb") as f_down:
-                    st.download_button("⬇️ Baixar PDF", data=f_down, file_name=new_name, mime="application/pdf", key=f"down_{idx}")
-            except Exception:
-                st.warning("Arquivo indisponível para download (foi excluído).")
-
-        with colE:
-            meta = files_meta.get(old_name, {})
+        with st.container():
             st.markdown(
-                f"<div class='small-note'>📎 {meta.get('pages', '-') } páginas — {meta.get('emitente', '-') } / NF {meta.get('numero', '-')}</div>",
+                f"""<div class="card"><b>📄 {item['file_name']}</b><br>
+            <span class="small-note">Origem: {item['origem']} | Páginas: {item['pages']}</span></div>""",
                 unsafe_allow_html=True,
             )
 
-        st.markdown("</div>", unsafe_allow_html=True)
+            col_d1, col_d2, col_d3 = st.columns([2, 2, 1])
 
-    # ---------------------------------------------------------------------
-    # EXTRA: SEPARAR PÁGINAS INDIVIDUAIS DOS PDFs GERADOS
-    # ---------------------------------------------------------------------
-    st.markdown("---")
-    st.subheader("✂️ Separar páginas individuais")
+            # Renomear
+            with col_d1:
+                new_name = st.text_input("Renomear", value=item["file_name"], key=f"ren_{idx}", label_visibility="collapsed")
 
-    sel_file = st.selectbox("Escolha um arquivo", [""] + [r["file"] for r in resultados], key="split_choice")
-
-    if sel_file:
-        file_path = session_folder / sel_file
-
-        try:
-            reader = PdfReader(str(file_path))
-            n_pages = len(reader.pages)
-
-            st.info(f"📄 Total de páginas: **{n_pages}**")
-
-            col_s1, col_s2 = st.columns([2, 1])
-
-            with col_s1:
-                pages_to_extract = st.text_input("Páginas (ex: 1,2,5-7)", key="split_pages")
-
-            with col_s2:
-                if st.button("✂️ Separar agora"):
+            with col_d2:
+                if st.button("💾 Salvar Nome", key=f"btn_ren_{idx}"):
                     try:
-                        pages_list = []
-                        for part in pages_to_extract.split(","):
-                            part = part.strip()
-                            if "-" in part:
-                                parts = part.split("-")
-                                if len(parts) == 2:
-                                    a = int(parts[0])
-                                    b = int(parts[1])
-                                    pages_list.extend(list(range(a, b + 1)))
-                            else:
-                                pages_list.append(int(part))
-
-                        writer = PdfWriter()
-                        added = 0
-
-                        for p in pages_list:
-                            if 1 <= p <= n_pages:
-                                writer.add_page(reader.pages[p - 1])
-                                added += 1
-
-                        if added == 0:
-                            st.warning("Nenhuma página válida informada.")
-                        else:
-                            out_path = session_folder / f"{sel_file[:-4]}_split.pdf"
-                            with open(out_path, "wb") as out_file:
-                                writer.write(out_file)
-
-                            with open(out_path, "rb") as f_out:
-                                st.download_button("⬇️ Baixar PDF separado", data=f_out, file_name=f"{sel_file[:-4]}_split.pdf", mime="application/pdf")
-
-                            st.success(f"Arquivo gerado ({added} páginas).")
-
+                        new_path = fpath.parent / new_name
+                        if not new_name.lower().endswith(".pdf"):
+                            new_path = fpath.parent / (new_name + ".pdf")
+                        fpath.rename(new_path)
+                        item["path"] = str(new_path)
+                        item["file_name"] = new_path.name
+                        st.success("Renomeado!")
+                        time.sleep(0.5)
+                        st.rerun()
                     except Exception as e:
-                        st.error(f"Erro ao separar páginas: {e}")
+                        st.error(f"Erro: {e}")
 
-        except Exception as e:
-            st.error(f"Erro ao separar páginas: {e}")
+            # Download
+            with col_d3:
+                with open(item["path"], "rb") as f:
+                    st.download_button("⬇️ Baixar", f, file_name=item["file_name"], key=f"dl_{idx}")
 
+    # =====================================================================
+    # EXPORTAÇÃO E DOWNLOAD EM MASSA
+    # =====================================================================
+    st.markdown("---")
+    st.subheader("📦 Download em Massa & Backup")
 
-# =====================================================================
-# BLOCO 6/6 — LOGS AVANÇADOS, EXPORT/IMPORT DE PADRÕES, LIMPEZA E FINALIZAÇÃO
-# =====================================================================
+    c_zip, c_patterns = st.columns(2)
 
-# --- Funções utilitárias adicionais ---
-def export_patterns_to_file(dest: Path):
-    try:
-        save_patterns(PATTERNS)
-        with open(dest, "w", encoding="utf-8") as f:
-            json.dump(PATTERNS, f, ensure_ascii=False, indent=2)
-        return True, f"Exportado para {dest}"
-    except Exception as e:
-        return False, str(e)
+    with c_zip:
+        # ZIP de todos os PDFs
+        if st.button("Compactar Tudo (ZIP)"):
+            mem_zip = io.BytesIO()
+            with zipfile.ZipFile(mem_zip, "w") as zf:
+                for item in results:
+                    p = Path(item["path"])
+                    if p.exists():
+                        zf.write(p, arcname=p.name)
+            mem_zip.seek(0)
+            st.download_button("⬇️ Baixar ZIP Completo", mem_zip, "notas_processadas.zip", "application/zip")
 
+    with c_patterns:
+        # Backup dos Padrões (Crucial para Cloud)
+        patterns_str = json.dumps(PATTERNS, indent=2, ensure_ascii=False)
+        st.download_button("📤 Exportar Padrões (.json)", patterns_str, "meus_padroes.json", "application/json")
 
-def import_patterns_from_file(src: Path):
-    try:
-        with open(src, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            for k, v in data.items():
-                nk = normalize_pattern_key(k)
-                conflict = False
-                for ek in list(PATTERNS.keys()):
-                    if normalize_pattern_key(ek) == nk and ek != k:
-                        conflict = True
-                        break
-                if not conflict:
-                    PATTERNS[k] = v
-            save_patterns(PATTERNS)
-            return True, "Importado e mesclado."
-        return False, "Arquivo inválido."
-    except Exception as e:
-        return False, str(e)
-
-
-# --- Painel de logs e exportações ---
-st.markdown("---")
-st.markdown("### 🧾 Logs & Exportações")
-
-col_l1, col_l2, col_l3 = st.columns([2, 1, 1])
-with col_l1:
-    recent = st.session_state.get("processed_logs", [])[-500:]
-    st.text_area(
-        "Logs recentes (últimas linhas)",
-        value="\n".join([f"{l[0]} | {l[2]} | {l[3]} | {l[4]}" for l in recent]),
-        height=180,
-        key="logs_area",
-    )
-
-with col_l2:
-    export_path = CONFIG_DIR / f"patterns_export_{int(time.time())}.json"
-    if st.button("📤 Exportar padrões"):
-        ok, msg = export_patterns_to_file(export_path)
-        if ok:
-            with open(export_path, "rb") as f:
-                st.download_button("⬇️ Baixar patterns.json", data=f, file_name=export_path.name, mime="application/json")
-            st.success("Exportado com sucesso.")
-        else:
-            st.error(f"Erro: {msg}")
-
-with col_l3:
-    uploaded_patterns = st.file_uploader("📥 Importar padrões (.json)", type=["json"], key="import_patterns")
-    if uploaded_patterns is not None:
-        try:
-            temp_import = CONFIG_DIR / f"import_{int(time.time())}.json"
-            with open(temp_import, "wb") as f:
-                f.write(uploaded_patterns.getvalue())
-            ok, msg = import_patterns_from_file(temp_import)
-            if ok:
-                st.success(msg)
+        # Importar
+        uploaded_pat = st.file_uploader("Importar Padrões Salvos", type=["json"])
+        if uploaded_pat:
+            try:
+                loaded = json.load(uploaded_pat)
+                # merge, sem sobrescrever conflitos se preferir pode validar
+                PATTERNS.update(loaded)
+                save_patterns(PATTERNS)
+                st.success("Padrões importados! A página irá recarregar.")
+                time.sleep(1)
                 st.rerun()
-            else:
-                st.error(msg)
-        except Exception as e:
-            st.error(str(e))
+            except Exception:
+                st.error("JSON inválido.")
 
-
-# --- Consolidação e Download ZIP (final) ---
-st.markdown("---")
-st.markdown("### ✅ Finalizar / Baixar tudo")
-
-col_f1, col_f2 = st.columns([1, 2])
-with col_f1:
-    if st.button("📦 Baixar tudo (ZIP final)"):
-        try:
-            mem = io.BytesIO()
-            with zipfile.ZipFile(mem, "w") as zf:
-                for r in st.session_state.get("resultados", []):
-                    fname = r["file"]
-                    src = Path(st.session_state["session_folder"]) / fname
-                    if src.exists():
-                        arcname = st.session_state.get("novos_nomes", {}).get(fname, fname)
-                        zf.write(src, arcname=arcname)
-            mem.seek(0)
-            st.download_button("⬇️ Confirmar download (ZIP)", data=mem, file_name="notas_processadas_final.zip", mime="application/zip")
-            st.success("ZIP pronto para download.")
-        except Exception as e:
-            st.error(f"Erro ao gerar zip: {e}")
-
-with col_f2:
-    if st.button("🧹 Limpar sessão (arquivos temporários)"):
-        try:
-            sf = st.session_state.get("session_folder")
-            if sf and Path(sf).exists():
-                shutil.rmtree(sf, ignore_errors=True)
-            for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
-                st.session_state.pop(k, None)
-            st.success("Sessão limpa — arquivos temporários removidos.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Erro ao limpar sessão: {e}")
-
-
-# --- Sugestões de tuning para produção (apenas UI) ---
-st.markdown("---")
-st.markdown("### ⚙️ Dicas rápidas de performance")
-st.markdown(
-    """
-- Reduza `worker_count` se houver instabilidade no provedor de execução.
-- Use `MAX_TOTAL_PAGES` por variável de ambiente para limitar lotes grandes.
-- Em produção, mova o processamento pesado para um worker externo (Celery / Cloud Function) e apenas mostre resultados no Streamlit.
-"""
-)
-
-# --- Segurança: checar uso de secrets ---
-st.markdown("---")
-if hasattr(st, "secrets") and st.secrets.get("GOOGLE_API_KEY"):
-    st.success("🔒 Usando st.secrets para a chave Google (recomendado).")
-else:
-    st.warning("🔑 A chave Google está vindo de variáveis de ambiente. Considere usar st.secrets em produção.")
-
-# --- Final: garantir que patterns estejam salvos ---
+# --- garantir que patterns estejam salvos ---
 try:
     save_patterns(PATTERNS)
 except Exception:
     pass
 
 # =====================================================================
-# FIM DO ARQUIVO — TURBO v3
+# FIM DO ARQUIVO — TURBO v5 (Refined, com correções)
 # =====================================================================
