@@ -1,6 +1,5 @@
 # turbo_v5_corrected_sections.py
-# Versão: Turbo v5 — Corrigida (seções)
-# Source uploaded (original user file): /mnt/data/arquivo final.txt
+# Versão: Turbo v5 — Corrigida (seções e indentação)
 
 # =====================================================================
 # PARTE 1/6 — IMPORTS E CONFIGURAÇÃO INICIAL
@@ -361,7 +360,7 @@ def processar_pagina_openai_fallback(prompt_sistema, pdf_bytes):
         return {"error": f"Erro Vision: {str(e)}"}, False, 0, "GPT-Vision"
 
 # =====================================================================
-# PARTE 5/6 — WORKER E LOOP PRINCIPAL (mantendo estrutura)
+# PARTE 5/6 — WORKER E LOOP PRINCIPAL
 # =====================================================================
 
 def processar_pagina_worker(job_data):
@@ -432,7 +431,7 @@ if clear_session:
     for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
         st.session_state.pop(k, None)
     st.success("Sessão limpa.")
-    st.experimental_rerun()
+    st.rerun()
 
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
@@ -457,7 +456,6 @@ if uploaded_files and process_btn:
 
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
 
-    # preparar jobs por página
     # preparar jobs por página
     jobs = []
     for a in arquivos:
@@ -484,27 +482,26 @@ if uploaded_files and process_btn:
         except Exception as e:
             st.warning(f"Erro ao ler páginas de {name}: {e}")
 
-    # ⬇️ **CORREÇÃO AQUI**
     if not jobs:
         st.error("Nenhuma página válida encontrada nos PDFs enviados.")
         st.stop()
 
     # executar em paralelo
-agrupados_bytes = {}
+    agrupados_bytes = {} # Declarado apenas uma vez agora
+    processed_logs = []
+    resultados_meta = []
+    processed_count = 0
+    total_jobs = len(jobs) if jobs else 1
+    progress_bar = st.progress(0.0)
+    progresso_text = st.empty()
 
-agrupados_bytes = {}
-processed_logs = []
-resultados_meta = []
-processed_count = 0
-total_jobs = len(jobs) if jobs else 1
-progress_bar = st.progress(0.0)
-progresso_text = st.empty()
+    start_all = time.time()
 
-start_all = time.time()   # ✅ CORREÇÃO: variável agora definida
-
-with ThreadPoolExecutor(max_workers=workers) as executor:
-    future_to_job = {executor.submit(processar_pagina_worker, job): job for job in jobs}
-    for future in as_completed(future_to_job):
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_job = {executor.submit(processar_pagina_worker, job): job for job in jobs}
+        
+        # CORREÇÃO DE INDENTAÇÃO ABAIXO
+        for future in as_completed(future_to_job):
             processed_count += 1
             try:
                 result = future.result()
@@ -526,13 +523,17 @@ with ThreadPoolExecutor(max_workers=workers) as executor:
                     nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
                     emitente = limpar_emitente(nome_map)
                     key = (numero, emitente)
+                    
+                    # Nota: agrupados_bytes é thread-safe aqui pois estamos na thread principal consumindo o iterator
                     agrupados_bytes.setdefault(key, []).append(result.get("pdf_bytes"))
+                    
                     status_lbl = result.get("status")
                     processed_logs.append((page_label, tempo, status_lbl, f"{numero} / {emitente}", provider_used))
                     resultados_meta.append({"arquivo_origem": name, "pagina": idx+1, "emitente_detectado": emitente_raw, "numero_detectado": numero_raw, "status": status_lbl, "tempo_s": round(tempo,2), "provider": provider_used})
                     progresso_text.markdown(f"<span class='success-log'>✅ {page_label} — {status_lbl} ({tempo:.2f}s)</span>", unsafe_allow_html=True)
             except Exception as e:
                 st.error(f"Erro crítico no worker: {e}")
+            
             progress_bar.progress(min(processed_count/total_jobs, 1.0))
 
     # gerar arquivos finais
@@ -568,5 +569,4 @@ with ThreadPoolExecutor(max_workers=workers) as executor:
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
     st.rerun()
-
 # FIM
