@@ -432,7 +432,7 @@ if clear_session:
     for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
         st.session_state.pop(k, None)
     st.success("Sessão limpa.")
-    st.experimental_rerun()
+    st.rerun()
 
 if uploaded_files and process_btn:
     session_id = str(uuid.uuid4())
@@ -550,6 +550,6 @@ if uploaded_files and process_btn:
     st.session_state["files_meta"] = files_meta
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
-    st.experimental_rerun()
+    st.rerun()
 
 # FIM
