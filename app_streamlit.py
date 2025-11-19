@@ -9,6 +9,9 @@ import unicodedata
 import re
 import hashlib
 import pickle
+import fitz
+import base64
+import openai
 from pathlib import Path
 from PyPDF2 import PdfReader, PdfWriter
 import google.generativeai as genai
@@ -318,38 +321,83 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
             else:
                 return {"error": str(e)}, False, 0, "Gemini"
     return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
-def processar_arquivo_worker(arquivo_dados, use_cache, batch_size=BATCH_SIZE_DEFAULT):
-    # ... (início da função igual: fname, reader, prompt, cache...) ...
-    # ... (mantém a parte de pegar cache) ...
+def processar_pagina_openai_fallback(prompt_sistema, pdf_bytes):
+    """
+    FALLBACK VISUAL: Converte a página escaneada em imagem e envia para o GPT-4o Vision.
+    """
+    if not openai_client:
+        return {"error": "OpenAI não configurada (.env)"}, False, 0, "OpenAI"
 
-    # === AQUI COMEÇA A MUDANÇA NA LÓGICA DO LOOP ===
-    
-    # Recuperar modo escolhido (se não vier no argumento, assume Gemini)
-    modo = arquivo_dados.get("mode", "GEMINI") 
-    
-    while curr < num_pages:
-        end = min(curr + batch_size, num_pages)
-        batch_imgs = []
-        idxs = []
+    start = time.time()
+    try:
+        # 1. Converter PDF (bytes) para Imagem (PNG) em memória
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if len(doc) < 1: return {"error": "PDF vazio"}, False, 0, "OpenAI"
+
+        page = doc.load_page(0)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) # Zoom 2x para melhorar OCR
+        img_bytes = pix.tobytes("png")
+        base64_image = base64.b64encode(img_bytes).decode('utf-8')
+
+        # 2. Enviar Imagem para o GPT-4o (Vision Mode)
+        response = openai_client.chat.completions.create(
+            model="gpt-4o", # Ou gpt-4o-mini (mais barato)
+            messages=[
+                {"role": "system", "content": "Você é um assistente OCR. Extraia os dados JSON solicitados da imagem."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt_sistema},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}", "detail": "high"}}
+                ]}
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"} 
+        )
         
-        # Montar lote (Igual ao anterior)
-        for i in range(curr, end):
-            if i < len(reader.pages):
-                try:
-                    buf = io.BytesIO()
-                    temp_writer = PdfWriter()
-                    temp_writer.add_page(reader.pages[i])
-                    temp_writer.write(buf)
-                    batch_imgs.append({"mime_type": "application/pdf", "data": buf.getvalue()})
-                    idxs.append(i)
-                except Exception as e:
-                    logs.append(f"Erro pág {i}: {e}")
+        tempo = round(time.time() - start, 2)
+        conteudo = response.choices[0].message.content
+        try:
+            dados = json.loads(conteudo)
+            return dados, True, tempo, "GPT-Vision"
+        except:
+            return {"error": "JSON Inválido OpenAI"}, False, tempo, "GPT-Vision"
 
-        if not batch_imgs:
-            curr += batch_size
-            continue
+    except Exception as e:
+        return {"error": f"Erro Vision: {str(e)}"}, False, 0, "GPT-Vision"
+def processar_pagina_worker(job_data):
+    pdf_bytes = job_data["bytes"]
+    prompt = job_data["prompt"]
+    name = job_data["name"]
+    page_idx = job_data["page_idx"]
+    # NOVO: Recebe o modo escolhido
+    mode = job_data.get("mode", "GEMINI") 
+    
+    cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
+    cached_result = document_cache.get(cache_key)
+    
+    if cached_result and job_data["use_cache"]:
+        return {
+            "status": "CACHE", "dados": cached_result['dados'],
+            "tempo": cached_result['tempo'], "provider": cached_result['provider'],
+            "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes
+        }
 
-        extracted = []
+    # LÓGICA DE SELEÇÃO
+    if mode == "OPENAI":
+        # Vai direto para o GPT (Visão)
+        dados, ok, tempo, provider = processar_pagina_openai_fallback(prompt, pdf_bytes)
+    else:
+        # Padrão: Tenta Gemini -> Se falhar, Tenta GPT (Fallback)
+        page_stream = io.BytesIO(pdf_bytes)
+        dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
+        
+        if (not ok) and openai_client:
+            dados, ok, tempo, provider = processar_pagina_openai_fallback(prompt, pdf_bytes)
+
+    if ok and "error" not in dados:
+        document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
+        return {"status": "OK", "dados": dados, "tempo": tempo, "provider": provider, "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes}
+    else:
+        return {"status": "ERRO", "dados": dados, "tempo": tempo, "provider": provider, "name": name, "page_idx": page_idx, "error_msg": dados.get("error", "Erro")}
         
         # =========================================================
         # FLUXO DINÂMICO (ESCOLHA DO USUÁRIO)
@@ -402,10 +450,9 @@ with st.sidebar:
     st.header("⚙️ Configuração")
     
     # --- NOVO: SELETOR DE PROVEDOR ---
-    st.markdown("### 🧠 Inteligência Principal")
-    provedor_escolhido = st.radio(
-        "Quem processa primeiro?",
-        ("Gemini (Google)", "GPT-4o (OpenAI)"),
+   st.markdown("### 🧠 Inteligência")
+    provider = st.radio("Modelo Principal", ["Gemini (Google)", "GPT-4o (OpenAI)"], index=0)
+    mode_sel = "GEMINI" if "Gemini" in provider else "OPENAI"
         index=0,
         help="Gemini é mais rápido/gratuito. GPT-4o é mais preciso em scans difíceis."
     )
@@ -596,7 +643,7 @@ if uploaded_files and process_btn:
                     "name": name,
                     "page_idx": idx,
                     "use_cache": st.session_state.get("use_cache", True),
-                    "mode": modo_principal  # <--- AQUI passamos a escolha do usuário
+                    "mode": mode_sel  # <--- AQUI passamos a escolha do usuário
                 })
         except Exception as e:
             processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "System"))
