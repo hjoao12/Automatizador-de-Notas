@@ -458,6 +458,7 @@ if uploaded_files and process_btn:
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
 
     # preparar jobs por página
+    # preparar jobs por página
     jobs = []
     for a in arquivos:
         name = a["name"]
@@ -469,16 +470,28 @@ if uploaded_files and process_btn:
                 w.add_page(page)
                 w.write(b)
                 page_bytes = b.getvalue()
-                jobs.append({"bytes": page_bytes, "prompt": (
-                    "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
-                    "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
-                ), "name": name, "page_idx": idx, "use_cache": use_cache, "mode": mode_sel})
+                jobs.append({
+                    "bytes": page_bytes,
+                    "prompt": (
+                        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
+                        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+                    ),
+                    "name": name,
+                    "page_idx": idx,
+                    "use_cache": use_cache,
+                    "mode": mode_sel
+                })
         except Exception as e:
             st.warning(f"Erro ao ler páginas de {name}: {e}")
+
+    # ⬇️ **CORREÇÃO AQUI**
     if not jobs:
-    st.error("Nenhuma página válida encontrada nos PDFs enviados.")
-    st.stop()
+        st.error("Nenhuma página válida encontrada nos PDFs enviados.")
+        st.stop()
+
     # executar em paralelo
+agrupados_bytes = {}
+
 agrupados_bytes = {}
 processed_logs = []
 resultados_meta = []
