@@ -309,59 +309,59 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
             else:
                 return {"error": str(e)}, False, 0, "Gemini"
     return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
-                def processar_pagina_worker(job_data):
-                    """Função executada em paralelo para processar uma página"""
-                    pdf_bytes = job_data["bytes"]
-                    prompt = job_data["prompt"]
-                    name = job_data["name"]
-                    page_idx = job_data["page_idx"]
-                    
-                    # 1. Verificar Cache
-                    cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
-                    cached_result = document_cache.get(cache_key)
-                    
-                    # Se tiver cache e o usuário quiser usar
-                    if cached_result and job_data["use_cache"]:
-                        return {
-                            "status": "CACHE",
-                            "dados": cached_result['dados'],
-                            "tempo": cached_result['tempo'],
-                            "provider": cached_result['provider'],
-                            "name": name,
-                            "page_idx": page_idx,
-                            "pdf_bytes": pdf_bytes
-                        }
-                
-                    # 2. Se não tiver cache, chama o Gemini
-                    page_stream = io.BytesIO(pdf_bytes)
-                    dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
-                    
-                    # Salvar no cache se deu certo
-                    if ok and "error" not in dados:
-                        document_cache.set(cache_key, {
-                            'dados': dados,
-                            'tempo': tempo,
-                            'provider': provider
-                        })
-                        return {
-                            "status": "OK",
-                            "dados": dados,
-                            "tempo": tempo,
-                            "provider": provider,
-                            "name": name,
-                            "page_idx": page_idx,
-                            "pdf_bytes": pdf_bytes
-                        }
-                    else:
-                        return {
-                            "status": "ERRO",
-                            "dados": dados,
-                            "tempo": tempo,
-                            "provider": provider,
-                            "name": name,
-                            "page_idx": page_idx,
-                            "error_msg": dados.get("error", "Erro desconhecido")
-                        }
+def processar_pagina_worker(job_data):
+    """Função executada em paralelo para processar uma página"""
+    pdf_bytes = job_data["bytes"]
+    prompt = job_data["prompt"]
+    name = job_data["name"]
+    page_idx = job_data["page_idx"]
+    
+    # 1. Verificar Cache
+    cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
+    cached_result = document_cache.get(cache_key)
+    
+    # Se tiver cache e o usuário quiser usar
+    if cached_result and job_data["use_cache"]:
+        return {
+            "status": "CACHE",
+            "dados": cached_result['dados'],
+            "tempo": cached_result['tempo'],
+            "provider": cached_result['provider'],
+            "name": name,
+            "page_idx": page_idx,
+            "pdf_bytes": pdf_bytes
+        }
+
+    # 2. Se não tiver cache, chama o Gemini
+    page_stream = io.BytesIO(pdf_bytes)
+    dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
+    
+    # Salvar no cache se deu certo
+    if ok and "error" not in dados:
+        document_cache.set(cache_key, {
+            'dados': dados,
+            'tempo': tempo,
+            'provider': provider
+        })
+        return {
+            "status": "OK",
+            "dados": dados,
+            "tempo": tempo,
+            "provider": provider,
+            "name": name,
+            "page_idx": page_idx,
+            "pdf_bytes": pdf_bytes
+        }
+    else:
+        return {
+            "status": "ERRO",
+            "dados": dados,
+            "tempo": tempo,
+            "provider": provider,
+            "name": name,
+            "page_idx": page_idx,
+            "error_msg": dados.get("error", "Erro desconhecido")
+        }
 
 # =====================================================================
 # SIDEBAR CONFIGURAÇÕES
