@@ -852,9 +852,7 @@ if "resultados" in st.session_state:
                     base_name = manage_target.rsplit('.pdf', 1)[0]
                     st.session_state[new_name_key] = f"{base_name}_parte.pdf"
                 
-                new_name = st.text_input("Nome do novo PDF:", 
-                                       value=st.session_state[new_name_key],
-                                       key=new_name_key)
+                new_name = st.text_input("Nome do novo PDF:", key=new_name_key)
                 
                 col_sep, col_rem, col_close = st.columns(3)
                 
