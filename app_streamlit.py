@@ -450,31 +450,28 @@ with st.sidebar:
     st.header("⚙️ Configuração")
     
     # --- NOVO: SELETOR DE PROVEDOR ---
-   st.markdown("### 🧠 Inteligência")
-    provider = st.radio("Modelo Principal", ["Gemini (Google)", "GPT-4o (OpenAI)"], index=0)
-    mode_sel = "GEMINI" if "Gemini" in provider else "OPENAI"
+    st.markdown("### 🧠 Inteligência")
+    provider = st.radio(
+        "Modelo Principal", 
+        ["Gemini (Google)", "GPT-4o (OpenAI)"], 
         index=0,
         help="Gemini é mais rápido/gratuito. GPT-4o é mais preciso em scans difíceis."
     )
     # Mapear escolha para string simples
-    modo_principal = "GEMINI" if "Gemini" in provedor_escolhido else "OPENAI"
+    mode_sel = "GEMINI" if "Gemini" in provider else "OPENAI"
     
     st.markdown("---")
-    
-    # Configuração de cache (continua igual)
-    st.markdown("#### Otimizações")
-    use_cache = st.checkbox("Usar Cache", value=True, key="use_cache")
-    workers = st.slider("Workers", 1, 8, MAX_WORKERS_DEFAULT)
-    # ... (resto do código da sidebar continua igual)
     
     # Configuração de cache
     st.markdown("#### Otimizações")
     use_cache = st.checkbox("Usar Cache", value=True, key="use_cache")
+    workers = st.slider("Workers", 1, 8, MAX_WORKERS_DEFAULT)
     
     if st.button("🔄 Limpar Cache"):
         document_cache.clear()
         st.success("Cache limpo!")
         st.rerun()
+
     st.markdown("---")
     st.markdown("### 📝 Gerenciar Padrões")
     
@@ -501,7 +498,6 @@ with st.sidebar:
         
         # --- REMOVER ---
         st.write("**Padrões Ativos:**")
-        # Lista ordenada para facilitar
         lista_padroes = sorted(SUBSTITUICOES_FIXAS.keys())
         
         sel_del = st.selectbox("Selecione para ver/excluir", [""] + lista_padroes)
@@ -514,7 +510,6 @@ with st.sidebar:
                 st.success("Removido!")
                 time.sleep(0.5)
                 st.rerun()
-
 # =====================================================================
 # DASHBOARD ANALÍTICO
 # =====================================================================
