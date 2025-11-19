@@ -1,6 +1,6 @@
-# turbo_v6_workflow.py
-# Versão: Turbo v6 — Workflow Edition
-# Melhoria: Split e Merge agora usam os arquivos JÁ processados (sem re-upload).
+# turbo_v6_1_fixed.py
+# Versão: Turbo v6.1 — Fixed
+# Correção: Erro de Attribute Error no pypdf (encadeamento de métodos removido)
 
 import os
 import io
@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 # =====================================================================
 load_dotenv()
 st.set_page_config(
-    page_title="Automatizador de Notas v6",
+    page_title="Automatizador de Notas v6.1",
     page_icon="⚡",
     layout="wide"
 )
@@ -51,7 +51,7 @@ div.stButton > button:hover { background-color: #0b3a5a; }
     unsafe_allow_html=True,
 )
 
-st.title("Automatizador de Notas Fiscais — Turbo v6 (Workflow)")
+st.title("Automatizador de Notas Fiscais — Turbo v6.1 (Fixed)")
 
 # =====================================================================
 # ESTRUTURAS E CONFIGURAÇÕES
@@ -204,7 +204,7 @@ except Exception as e:
     st.stop()
 
 # =====================================================================
-# WORKER (PROCESSAMENTO)
+# WORKER (PROCESSAMENTO) - CORRIGIDO AQUI
 # =====================================================================
 def processar_arquivo_worker(arquivo_dados, use_cache, batch_size=BATCH_SIZE_DEFAULT):
     fname = arquivo_dados["name"]
@@ -234,11 +234,24 @@ def processar_arquivo_worker(arquivo_dados, use_cache, batch_size=BATCH_SIZE_DEF
         end = min(curr + batch_size, num_pages)
         batch_imgs = []
         idxs = []
+        
+        # --- CORREÇÃO DO ERRO DO PYPDF ---
         for i in range(curr, end):
-            buf = io.BytesIO()
-            PdfWriter().add_page(reader.pages[i]).write(buf) if len(reader.pages) > i else None
-            batch_imgs.append({"mime_type": "application/pdf", "data": buf.getvalue()})
-            idxs.append(i)
+            if i < len(reader.pages):
+                try:
+                    buf = io.BytesIO()
+                    temp_writer = PdfWriter()
+                    temp_writer.add_page(reader.pages[i])
+                    temp_writer.write(buf)
+                    batch_imgs.append({"mime_type": "application/pdf", "data": buf.getvalue()})
+                    idxs.append(i)
+                except Exception as e:
+                    logs.append(f"Erro ao ler página {i+1}: {e}")
+        # ---------------------------------
+
+        if not batch_imgs:
+            curr += batch_size
+            continue
 
         # Call API
         extracted = []
@@ -319,32 +332,36 @@ if col1.button("🚀 Processar", type="primary") and uploaded_files:
         futures = {exc.submit(processar_arquivo_worker, f, use_cache): f["name"] for f in files_data}
         done = 0
         for fut in as_completed(futures):
-            res = fut.result()
-            done += 1
-            prog.progress(done / len(files_data))
-            
-            if "error" in res:
-                logs.append(f"❌ {res['name']}: {res['error']}")
-                continue
+            try:
+                res = fut.result()
+                done += 1
+                prog.progress(done / len(files_data))
                 
-            # Agrupamento
-            reader = PdfReader(io.BytesIO(res["bytes_originais"]))
-            for i, page_data in enumerate(res["results"]):
-                if not page_data: continue
-                
-                emit = limpar_emitente(substituir_nome_emitente(page_data.get("emitente", ""), page_data.get("cidade", "")))
-                num = limpar_numero(page_data.get("numero_nota", ""))
-                
-                if num == "0": continue
-                
-                key = (num, emit)
-                if key not in all_results: all_results[key] = []
-                
-                buf = io.BytesIO()
-                w = PdfWriter()
-                w.add_page(reader.pages[i])
-                w.write(buf)
-                all_results[key].append({"data": buf.getvalue(), "origem": res["name"]})
+                if "error" in res:
+                    logs.append(f"❌ {res['name']}: {res['error']}")
+                    continue
+                    
+                # Agrupamento
+                reader = PdfReader(io.BytesIO(res["bytes_originais"]))
+                for i, page_data in enumerate(res["results"]):
+                    if not page_data: continue
+                    
+                    emit = limpar_emitente(substituir_nome_emitente(page_data.get("emitente", ""), page_data.get("cidade", "")))
+                    num = limpar_numero(page_data.get("numero_nota", ""))
+                    
+                    if num == "0": continue
+                    
+                    key = (num, emit)
+                    if key not in all_results: all_results[key] = []
+                    
+                    # Extração segura da página para o resultado final
+                    buf = io.BytesIO()
+                    w = PdfWriter()
+                    w.add_page(reader.pages[i])
+                    w.write(buf)
+                    all_results[key].append({"data": buf.getvalue(), "origem": res["name"]})
+            except Exception as e:
+                logs.append(f"Erro fatal no arquivo: {e}")
 
     # Gerar Finais
     final_meta = []
