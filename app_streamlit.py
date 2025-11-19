@@ -318,65 +318,107 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
             else:
                 return {"error": str(e)}, False, 0, "Gemini"
     return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
-def processar_pagina_worker(job_data):
-    """Função executada em paralelo para processar uma página"""
-    pdf_bytes = job_data["bytes"]
-    prompt = job_data["prompt"]
-    name = job_data["name"]
-    page_idx = job_data["page_idx"]
-    
-    # 1. Verificar Cache
-    cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
-    cached_result = document_cache.get(cache_key)
-    
-    # Se tiver cache e o usuário quiser usar
-    if cached_result and job_data["use_cache"]:
-        return {
-            "status": "CACHE",
-            "dados": cached_result['dados'],
-            "tempo": cached_result['tempo'],
-            "provider": cached_result['provider'],
-            "name": name,
-            "page_idx": page_idx,
-            "pdf_bytes": pdf_bytes
-        }
+def processar_arquivo_worker(arquivo_dados, use_cache, batch_size=BATCH_SIZE_DEFAULT):
+    # ... (início da função igual: fname, reader, prompt, cache...) ...
+    # ... (mantém a parte de pegar cache) ...
 
-    # 2. Se não tiver cache, chama o Gemini
-    page_stream = io.BytesIO(pdf_bytes)
-    dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
+    # === AQUI COMEÇA A MUDANÇA NA LÓGICA DO LOOP ===
     
-    # Salvar no cache se deu certo
-    if ok and "error" not in dados:
-        document_cache.set(cache_key, {
-            'dados': dados,
-            'tempo': tempo,
-            'provider': provider
-        })
-        return {
-            "status": "OK",
-            "dados": dados,
-            "tempo": tempo,
-            "provider": provider,
-            "name": name,
-            "page_idx": page_idx,
-            "pdf_bytes": pdf_bytes
-        }
-    else:
-        return {
-            "status": "ERRO",
-            "dados": dados,
-            "tempo": tempo,
-            "provider": provider,
-            "name": name,
-            "page_idx": page_idx,
-            "error_msg": dados.get("error", "Erro desconhecido")
-        }
+    # Recuperar modo escolhido (se não vier no argumento, assume Gemini)
+    modo = arquivo_dados.get("mode", "GEMINI") 
+    
+    while curr < num_pages:
+        end = min(curr + batch_size, num_pages)
+        batch_imgs = []
+        idxs = []
+        
+        # Montar lote (Igual ao anterior)
+        for i in range(curr, end):
+            if i < len(reader.pages):
+                try:
+                    buf = io.BytesIO()
+                    temp_writer = PdfWriter()
+                    temp_writer.add_page(reader.pages[i])
+                    temp_writer.write(buf)
+                    batch_imgs.append({"mime_type": "application/pdf", "data": buf.getvalue()})
+                    idxs.append(i)
+                except Exception as e:
+                    logs.append(f"Erro pág {i}: {e}")
+
+        if not batch_imgs:
+            curr += batch_size
+            continue
+
+        extracted = []
+        
+        # =========================================================
+        # FLUXO DINÂMICO (ESCOLHA DO USUÁRIO)
+        # =========================================================
+        
+        # --- ROTA A: OPENAI COMO PRINCIPAL ---
+        if modo == "OPENAI":
+            # Se o usuário escolheu OpenAI, ignoramos Gemini e vamos direto pro "Fallback" (que agora é o principal)
+            # OpenAI GPT-4o-mini processa melhor página a página (visão) do que batch PDF
+            if openai_client:
+                for idx_img, img_data in zip(idxs, batch_imgs):
+                    # Usa a função de visão que criamos anteriormente
+                    d_oa, ok_oa, _, _ = processar_pagina_openai_fallback(prompt, img_data['data'])
+                    if ok_oa:
+                        if isinstance(d_oa, dict): d_oa['pagina'] = idx_img + 1
+                        elif isinstance(d_oa, list): 
+                             for x in d_oa: x['pagina'] = idx_img + 1
+                        extracted.extend([d_oa] if isinstance(d_oa, dict) else d_oa)
+            else:
+                logs.append("❌ OpenAI selecionada mas não configurada (.env).")
+
+        # --- ROTA B: GEMINI COMO PRINCIPAL (PADRÃO) ---
+        else:
+            sucesso_gemini = False
+            # Tenta Gemini
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    resp = model.generate_content([prompt] + batch_imgs)
+                    extracted = extrair_json_seguro(resp.text)
+                    sucesso_gemini = True
+                    break
+                except Exception:
+                    time.sleep(2)
+            
+            # Se falhou, Tenta OpenAI (Fallback Automático)
+            if not sucesso_gemini and openai_client:
+                for idx_img, img_data in zip(idxs, batch_imgs):
+                    d_oa, ok_oa, _, _ = processar_pagina_openai_fallback(prompt, img_data['data'])
+                    if ok_oa:
+                        if isinstance(d_oa, dict): d_oa['pagina'] = idx_img + 1
+                        extracted.extend([d_oa] if isinstance(d_oa, dict) else d_oa)
 
 # =====================================================================
 # SIDEBAR CONFIGURAÇÕES
 # =====================================================================
+# =====================================================================
+# SIDEBAR CONFIGURAÇÕES
+# =====================================================================
 with st.sidebar:
-    st.markdown("### 🔧 Configurações")
+    st.header("⚙️ Configuração")
+    
+    # --- NOVO: SELETOR DE PROVEDOR ---
+    st.markdown("### 🧠 Inteligência Principal")
+    provedor_escolhido = st.radio(
+        "Quem processa primeiro?",
+        ("Gemini (Google)", "GPT-4o (OpenAI)"),
+        index=0,
+        help="Gemini é mais rápido/gratuito. GPT-4o é mais preciso em scans difíceis."
+    )
+    # Mapear escolha para string simples
+    modo_principal = "GEMINI" if "Gemini" in provedor_escolhido else "OPENAI"
+    
+    st.markdown("---")
+    
+    # Configuração de cache (continua igual)
+    st.markdown("#### Otimizações")
+    use_cache = st.checkbox("Usar Cache", value=True, key="use_cache")
+    workers = st.slider("Workers", 1, 8, MAX_WORKERS_DEFAULT)
+    # ... (resto do código da sidebar continua igual)
     
     # Configuração de cache
     st.markdown("#### Otimizações")
@@ -553,7 +595,8 @@ if uploaded_files and process_btn:
                     "prompt": prompt,
                     "name": name,
                     "page_idx": idx,
-                    "use_cache": st.session_state.get("use_cache", True)
+                    "use_cache": st.session_state.get("use_cache", True),
+                    "mode": modo_principal  # <--- AQUI passamos a escolha do usuário
                 })
         except Exception as e:
             processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "System"))
