@@ -857,121 +857,116 @@ if "resultados" in st.session_state:
                     st.error(f"Erro ao renderizar PDF: {e}")
             else:
                 st.warning("Arquivo não encontrado no disco.")
-       # --- CÓDIGO NOVO COMEÇA AQUI ---
-        # 2. Carregar lógica do arquivo
+        # ##################################################
+
+        # (Código original de separar páginas continua aqui...)
         try:
             reader = PdfReader(str(file_path))
-            n_pages = len(reader.pages)
+            total_pages = len(reader.pages)
+            pages_info = [{"idx": i, "label": f"Página {i+1}"} for i in range(total_pages)]
         except Exception as e:
-            st.error(f"Erro ao ler: {e}")
-            n_pages = 0
+            st.error(f"Erro ao ler o arquivo: {str(e)}")
+            pages_info = []
+            total_pages = 0
         
-        if n_pages > 0:
-            st.divider()
+        if pages_info:
+            sel_key = f"_manage_sel_{manage_target}"
+            if sel_key not in st.session_state:
+                st.session_state[sel_key] = []
             
-            # === A: REORDENAÇÃO RÁPIDA (CAMPO DE TEXTO) ===
-            st.markdown("#### 🔃 Reordenar Páginas")
-            st.caption("Edite os números abaixo para mudar a ordem (ex: mude '1, 2' para '2, 1').")
+            col_sel, col_actions = st.columns([1, 2])
             
-            # Cria a lista padrão: "1, 2, 3..."
-            current_order = [str(i+1) for i in range(n_pages)]
-            val_padrao = ", ".join(current_order)
-            
-            c_ord_in, c_ord_btn = st.columns([4, 1])
-            # O input onde você digita a nova ordem
-            new_order = c_ord_in.text_input("Ordem das páginas:", value=val_padrao, key=f"ord_{manage_target}", label_visibility="collapsed")
-            
-            if c_ord_btn.button("Aplicar", key=f"apply_{manage_target}"):
-                try:
-                    # Transforma o texto "1, 3, 2" em números que o Python entende
-                    parts = [p.strip() for p in new_order.split(",") if p.strip().isdigit()]
-                    indices = [int(x)-1 for x in parts]
-                    
-                    # Verifica se está tudo certo
-                    if not indices:
-                        st.warning("Lista vazia.")
-                    elif any(x < 0 or x >= n_pages for x in indices):
-                        st.error(f"Existem páginas inválidas (o arquivo só tem {n_pages}).")
+            with col_sel:
+                st.markdown("**Selecionar páginas:**")
+                for page in pages_info:
+                    is_checked = page["idx"] in st.session_state.get(sel_key, [])
+                    if st.checkbox(page["label"], value=is_checked, key=f"{sel_key}_{page['idx']}"):
+                        if page["idx"] not in st.session_state[sel_key]:
+                            st.session_state[sel_key].append(page["idx"])
                     else:
-                        # SALVA O NOVO PDF
-                        w = PdfWriter()
-                        for i in indices: w.add_page(reader.pages[i])
-                        with open(file_path, "wb") as f: w.write(f)
-                        
-                        # Atualiza o sistema
-                        st.session_state["files_meta"][manage_target]["pages"] = len(indices)
-                        for r in st.session_state["resultados"]:
-                            if r["file"] == manage_target: r["pages"] = len(indices)
-                        
-                        st.toast("Ordem atualizada! 🔄")
-                        time.sleep(1)
-                        st.rerun()
-                except Exception as e:
-                    st.error(f"Erro ao salvar: {e}")
-
-            st.divider()
-
-            # === B: FERRAMENTAS EXTRAS (SEPARAR/REMOVER) ===
-            with st.expander("✂️ Ferramentas de Seleção (Separar/Excluir)"):
-                pages_info = [{"idx": i, "label": f"Página {i+1}"} for i in range(n_pages)]
-                sel_key = f"_sel_{manage_target}"
-                if sel_key not in st.session_state: st.session_state[sel_key] = []
+                        if page["idx"] in st.session_state[sel_key]:
+                            st.session_state[sel_key].remove(page["idx"])
+            
+            with col_actions:
+                st.markdown("**Ações Avançadas:**")
                 
-                c_sel, c_act = st.columns([1, 1])
+                selected_count = len(st.session_state.get(sel_key, []))
+                st.write(f"📑 Selecionadas: **{selected_count}**")
                 
-                with c_sel:
-                    st.caption("Selecione páginas específicas:")
-                    for page in pages_info:
-                        chk = page["idx"] in st.session_state[sel_key]
-                        if st.checkbox(page["label"], value=chk, key=f"pg_{manage_target}_{page['idx']}"):
-                            if not chk: st.session_state[sel_key].append(page["idx"])
-                        else:
-                            if chk: st.session_state[sel_key].remove(page["idx"])
-
-                with c_act:
-                    st.caption("Ações com as selecionadas:")
-                    new_name_part = st.text_input("Nome do novo arquivo:", value=f"{manage_target.replace('.pdf','')}_parte.pdf", key=f"name_{manage_target}")
-                    
-                    b1, b2 = st.columns(2)
-                    
-                    if b1.button("Extrair ✅", key=f"ext_{manage_target}"):
-                        sel = sorted(st.session_state[sel_key])
-                        if sel:
-                            w = PdfWriter()
-                            for i in sel: w.add_page(reader.pages[i])
-                            out = session_folder / new_name_part
-                            with open(out, "wb") as f: w.write(f)
-                            
-                            # Adiciona na lista principal
-                            meta = {"file": new_name_part, "numero": "PART", "emitente": "EXT", "pages": len(sel)}
-                            st.session_state["resultados"].insert(0, meta)
-                            st.session_state["files_meta"][new_name_part] = meta
-                            st.session_state["novos_nomes"][new_name_part] = new_name_part
-                            st.success("Extraído!")
-                            st.session_state[sel_key] = []
-                            st.rerun()
-                        else:
+                new_name_key = f"_manage_newname_{manage_target}"
+                if new_name_key not in st.session_state:
+                    base_name = manage_target.rsplit('.pdf', 1)[0]
+                    st.session_state[new_name_key] = f"{base_name}_parte.pdf"
+                
+                new_name = st.text_input("Nome do novo PDF:", key=new_name_key)
+                
+                col_sep, col_rem = st.columns(2)
+                
+                with col_sep:
+                    if st.button("➗ Separar páginas", key=f"sep_{manage_target}"):
+                        selected = sorted(st.session_state.get(sel_key, []))
+                        if not selected:
                             st.warning("Selecione páginas.")
-                    
-                    if b2.button("Remover ❌", key=f"rm_{manage_target}"):
-                        sel = sorted(st.session_state[sel_key])
-                        if sel:
-                            keep = [i for i in range(n_pages) if i not in sel]
-                            if keep:
-                                w = PdfWriter()
-                                for i in keep: w.add_page(reader.pages[i])
-                                with open(file_path, "wb") as f: w.write(f)
-                                st.session_state["files_meta"][manage_target]["pages"] = len(keep)
-                                for r in st.session_state["resultados"]:
-                                    if r["file"] == manage_target: r["pages"] = len(keep)
-                                st.success("Removido!")
+                        else:
+                            try:
+                                new_writer = PdfWriter()
+                                reader = PdfReader(str(file_path))
+                                for page_idx in selected:
+                                    if 0 <= page_idx < len(reader.pages):
+                                        new_writer.add_page(reader.pages[page_idx])
+                                new_path = session_folder / new_name
+                                with open(new_path, "wb") as f:
+                                    new_writer.write(f)
+                                
+                                new_meta = {
+                                    "file": new_name,
+                                    "numero": files_meta.get(manage_target, {}).get("numero", ""),
+                                    "emitente": files_meta.get(manage_target, {}).get("emitente", ""),
+                                    "pages": len(selected)
+                                }
+                                st.session_state["resultados"].append(new_meta)
+                                st.session_state["files_meta"][new_name] = new_meta
+                                st.session_state["novos_nomes"][new_name] = new_name
+                                st.success(f"Criado: `{new_name}`")
+                                st.session_state[sel_key] = [] 
+                            except Exception as e:
+                                st.error(f"Erro: {str(e)}")
+                
+                with col_rem:
+                    if st.button("🗑️ Remover páginas", key=f"rem_{manage_target}"):
+                        selected = sorted(st.session_state.get(sel_key, []))
+                        if not selected:
+                            st.warning("Selecione páginas.")
+                        else:
+                            try:
+                                new_writer = PdfWriter()
+                                reader = PdfReader(str(file_path))
+                                for page_idx in range(len(reader.pages)):
+                                    if page_idx not in selected:
+                                        new_writer.add_page(reader.pages[page_idx])
+                                
+                                if len(new_writer.pages) > 0:
+                                    with open(file_path, "wb") as f:
+                                        new_writer.write(f)
+                                    st.session_state["files_meta"][manage_target]["pages"] = len(new_writer.pages)
+                                    for r in st.session_state["resultados"]:
+                                        if r["file"] == manage_target:
+                                            r["pages"] = len(new_writer.pages)
+                                    st.success(f"Páginas removidas.")
+                                else:
+                                    file_path.unlink()
+                                    st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != manage_target]
+                                    st.session_state["files_meta"].pop(manage_target, None)
+                                    st.session_state["novos_nomes"].pop(manage_target, None)
+                                    st.session_state.pop("_manage_target", None)
+                                    st.rerun()
                                 st.session_state[sel_key] = []
                                 st.rerun()
-                            else:
-                                st.error("Não pode remover todas.")
-                        else:
-                            st.warning("Selecione páginas.")
-        # --- CÓDIGO NOVO TERMINA AQUI ---
+                            except Exception as e:
+                                st.error(f"Erro: {str(e)}")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+
     # Dashboard analítico
     criar_dashboard_analitico()
 
