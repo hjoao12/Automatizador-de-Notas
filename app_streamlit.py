@@ -702,7 +702,7 @@ with col4:
         st.metric("❌ Erros", erros)
     
     # --- NOVO BLOCO: TEMPO ECONOMIZADO ---
-    st.markdown("---")
+st.markdown("---")
     col_tempo_1, col_tempo_2 = st.columns([1, 3])
     with col_tempo_1:
         # Estimativa: Um humano leva cerca de 2 minutos para abrir, ler, renomear e salvar um PDF.
