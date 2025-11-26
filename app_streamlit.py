@@ -10,6 +10,7 @@ import re
 import hashlib
 import pickle
 import base64
+from streamlit_pdf_viewer import pdf_viewer
 from pathlib import Path
 from PyPDF2 import PdfReader, PdfWriter
 import google.generativeai as genai
@@ -845,23 +846,18 @@ if "resultados" in st.session_state:
         
         file_path = session_folder / manage_target
         
-        # ### NOVO: VISUALIZADOR DE PDF (CORRIGIDO PARA CHROME) ###
-        with st.expander("👁️ Clique aqui para Visualizar o PDF", expanded=True):
+        # ### VISUALIZADOR PROFISSIONAL (VIA BIBLIOTECA) ###
+        with st.expander("👁️ Visualizar Arquivo Completo", expanded=True):
             if file_path.exists():
                 try:
-                    with open(file_path, "rb") as f:
-                        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-                    
-                    # CORREÇÃO: Usamos <embed> em vez de <iframe>
-                    # O Chrome aceita melhor <embed> ou <object> para dados base64
-                    pdf_display = f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800px" type="application/pdf">'
-                    
-                    st.markdown(pdf_display, unsafe_allow_html=True)
+                    # width="100%" ajusta a largura à coluna
+                    # height=800 define a altura da janela de rolagem
+                    pdf_viewer(input=str(file_path), width=700, height=800)
                 except Exception as e:
-                    st.error(f"Erro ao visualizar: {e}")
+                    st.error(f"Erro ao renderizar PDF: {e}")
             else:
-                st.warning("Arquivo não encontrado.")
-        # #################################
+                st.warning("Arquivo não encontrado no disco.")
+        # ##################################################
 
         # (Código original de separar páginas continua aqui...)
         try:
