@@ -547,15 +547,17 @@ if uploaded_files and process_btn:
 
     st.info(f"📄 Total de páginas a processar: {total_paginas}")
 
-    agrupados_bytes = {}
+    # Dicionário agora vai guardar metadados para ordenação
+    agrupados_dados = {} 
+    
     resultados_meta = []
     processed_logs = []
-    progresso = 0
+    processed_count = 0
+    
     progress_bar = st.progress(0.0)
     progresso_text = st.empty()
     start_all = time.time()
 
-    # --- PROMPT ATUALIZADO ---
     prompt = (
         "Você é um extrator de dados OCR. Analise esta página. "
         "Extraia: 'emitente' (Nome fantasia principal), 'numero_nota' (Apenas dígitos) e 'cidade'. "
@@ -566,36 +568,35 @@ if uploaded_files and process_btn:
         "{\"emitente\": \"string ou null\", \"numero_nota\": \"string ou null\", \"cidade\": \"string ou null\"}"
     )
 
-    # 1. Preparar trabalhos (Jobs)
+    # 1. Preparar trabalhos
     jobs = []
     for a in arquivos:
         name = a["name"]
         try:
             reader = PdfReader(io.BytesIO(a["bytes"]))
             for idx, page in enumerate(reader.pages):
-                # Extrair bytes da página individualmente para enviar ao worker
                 b = io.BytesIO()
                 w = PdfWriter()
                 w.add_page(page)
                 w.write(b)
                 page_bytes = b.getvalue()
                 
+                # Importante: Estamos mandando o 'idx' (número da página) junto
                 jobs.append({
                     "bytes": page_bytes,
                     "prompt": prompt,
                     "name": name,
-                    "page_idx": idx,
+                    "page_idx": idx, 
                     "use_cache": st.session_state.get("use_cache", True)
                 })
         except Exception as e:
             processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "System"))
 
     # 2. Executar em Paralelo
-    MAX_WORKERS = 4  # Aumentei para 4 para ser mais rápido (pode manter 2 se preferir)
-    processed_count = 0
+    MAX_WORKERS = 4
     total_jobs = len(jobs) if jobs else 1
     
-    st.info(f"🚀 Iniciando processamento TURBO de {len(jobs)} páginas com {MAX_WORKERS} threads simultâneas...")
+    st.info(f"🚀 Iniciando processamento de {len(jobs)} páginas...")
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_job = {executor.submit(processar_pagina_worker, job): job for job in jobs}
@@ -604,7 +605,6 @@ if uploaded_files and process_btn:
             processed_count += 1
             try:
                 result = future.result()
-                
                 name = result["name"]
                 idx = result["page_idx"]
                 page_label = f"{name} (pág {idx+1})"
@@ -612,16 +612,8 @@ if uploaded_files and process_btn:
                 if result["status"] == "ERRO":
                     processed_logs.append((page_label, result["tempo"], "ERRO_IA", result["error_msg"], result["provider"]))
                     progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO</span>", unsafe_allow_html=True)
-                    resultados_meta.append({
-                        "arquivo_origem": name, "pagina": idx+1, "status": "ERRO", "provider": result["provider"]
-                    })
                 else:
-                    # Sucesso (OK ou CACHE)
                     dados = result["dados"]
-                    tempo = result["tempo"]
-                    provider = result["provider"]
-                    
-                    # Validação e Correção
                     dados = validar_e_corrigir_dados(dados)
                     
                     emitente_raw = dados.get("emitente", "") or ""
@@ -632,60 +624,72 @@ if uploaded_files and process_btn:
                     nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
                     emitente = limpar_emitente(nome_map)
 
-                    # Guardar para gerar o PDF final
+                    # AQUI ESTÁ O SEGREDO: 
+                    # Guardamos um dicionário com o ID da página, e não só os bytes
                     key = (numero, emitente)
-                    agrupados_bytes.setdefault(key, []).append(result["pdf_bytes"])
+                    agrupados_dados.setdefault(key, []).append({
+                        "page_idx": idx,          # Guardamos a ordem original
+                        "pdf_bytes": result["pdf_bytes"],
+                        "file_origin": name       # Útil se processar vários arquivos juntos
+                    })
 
                     status_lbl = "CACHE" if result["status"] == "CACHE" else "OK"
                     css_class = "success-log" if result["status"] == "OK" else "warning-log"
                     
-                    processed_logs.append((page_label, tempo, status_lbl, f"{numero} / {emitente}", provider))
+                    processed_logs.append((page_label, result["tempo"], status_lbl, f"{numero} / {emitente}", result["provider"]))
                     resultados_meta.append({
                         "arquivo_origem": name,
                         "pagina": idx+1,
                         "emitente_detectado": emitente_raw,
                         "numero_detectado": numero_raw,
                         "status": status_lbl,
-                        "tempo_s": round(tempo, 2),
-                        "provider": provider
+                        "tempo_s": round(result["tempo"], 2),
+                        "provider": result["provider"]
                     })
-                    progresso_text.markdown(f"<span class='{css_class}'>✅ {page_label} — {status_lbl} ({tempo:.2f}s)</span>", unsafe_allow_html=True)
+                    progresso_text.markdown(f"<span class='{css_class}'>✅ {page_label} — {status_lbl}</span>", unsafe_allow_html=True)
 
             except Exception as e:
-                st.error(f"Erro crítico no worker: {e}")
+                st.error(f"Erro crítico: {e}")
             
             progress_bar.progress(min(processed_count/total_jobs, 1.0))
 
-    # 3. Gerar arquivos finais
+    # 3. Gerar arquivos finais (COM ORDENAÇÃO CORRIGIDA)
     resultados = []
     files_meta = {}
-    for (numero, emitente), pages_bytes in agrupados_bytes.items():
+    
+    for (numero, emitente), pages_list in agrupados_dados.items():
         if not numero or numero == "0":
             continue
+            
+        # --- A CORREÇÃO MÁGICA ---
+        # Ordena a lista de páginas baseada no 'page_idx' (número da página original)
+        # Isso garante que a Página 1 venha antes da Página 2, mesmo que a 2 tenha sido processada antes.
+        pages_list.sort(key=lambda x: (x['file_origin'], x['page_idx']))
+        # -------------------------
+
         writer = PdfWriter()
-        for pb in pages_bytes:
+        for p_data in pages_list:
             try:
-                r = PdfReader(io.BytesIO(pb))
+                r = PdfReader(io.BytesIO(p_data["pdf_bytes"]))
                 for p in r.pages:
                     writer.add_page(p)
             except Exception:
                 continue
         
-        # --- APLICAÇÃO DA CORREÇÃO DE SEGURANÇA NO NOME ---
         emitente_safe = limpar_para_nome_arquivo(emitente)
         nome_pdf = f"DOC {numero}_{emitente_safe}.pdf"
-        # --------------------------------------------------
-
         caminho = session_folder / nome_pdf
+        
         with open(caminho, "wb") as f_out:
             writer.write(f_out)
+            
         resultados.append({
             "file": nome_pdf,
             "numero": numero,
             "emitente": emitente,
-            "pages": len(pages_bytes)
+            "pages": len(pages_list)
         })
-        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": len(pages_bytes)}
+        files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": len(pages_list)}
 
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
@@ -695,7 +699,6 @@ if uploaded_files and process_btn:
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
     
-    # Mostrar dashboard após processamento (Chamada limpa, sem erros de indentação)
     criar_dashboard_analitico()
     
     st.rerun()
