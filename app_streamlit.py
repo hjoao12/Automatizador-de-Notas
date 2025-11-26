@@ -845,13 +845,17 @@ if "resultados" in st.session_state:
         
         file_path = session_folder / manage_target
         
-        # ### NOVO: VISUALIZADOR DE PDF ###
-        with st.expander("👁️ Clique aqui para Visualizar o PDF", expanded=False):
+        # ### NOVO: VISUALIZADOR DE PDF (CORRIGIDO PARA CHROME) ###
+        with st.expander("👁️ Clique aqui para Visualizar o PDF", expanded=True):
             if file_path.exists():
                 try:
                     with open(file_path, "rb") as f:
                         base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-                    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
+                    
+                    # CORREÇÃO: Usamos <embed> em vez de <iframe>
+                    # O Chrome aceita melhor <embed> ou <object> para dados base64
+                    pdf_display = f'<embed src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800px" type="application/pdf">'
+                    
                     st.markdown(pdf_display, unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"Erro ao visualizar: {e}")
