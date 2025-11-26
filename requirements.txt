@@ -7,3 +7,4 @@ requests
 pymupdf
 streamlit-sortables
 pypdf
+streamlit-pdf-viewer
