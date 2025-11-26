@@ -291,7 +291,7 @@ def calcular_delay(tentativa, error_msg):
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
 def processar_pagina_gemini(prompt_instrucao, page_stream):
-    """Processa uma página PDF com Gemini com retry"""
+    """Processa uma página PDF com Gemini com retry e limpeza robusta de JSON"""
     for tentativa in range(MAX_RETRIES + 1):
         try:
             start = time.time()
@@ -301,12 +301,27 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
                 request_options={'timeout': 60}
             )
             tempo = round(time.time() - start, 2)
-            texto = resp.text.strip().lstrip("```json").rstrip("```").strip()
+            
+            # --- CORREÇÃO CIRÚRGICA AQUI ---
+            # Em vez de apenas strip(), buscamos o primeiro bloco que parece um JSON { ... }
+            texto_raw = resp.text
+            match = re.search(r"\{.*\}", texto_raw, re.DOTALL)
+            
+            if match:
+                texto_limpo = match.group(0) # Pega só o que está entre chaves
+            else:
+                texto_limpo = texto_raw # Tenta o texto todo se não achar chaves
+
             try:
-                dados = json.loads(texto)
-            except Exception as e:
-                dados = {"error": f"Resposta não era JSON válido: {str(e)}", "_raw": texto[:200]}
+                dados = json.loads(texto_limpo)
+            except json.JSONDecodeError:
+                # Última tentativa de limpeza forçada
+                texto_limpo = texto_raw.replace("```json", "").replace("```", "").strip()
+                dados = json.loads(texto_limpo)
+            # -------------------------------
+
             return dados, True, tempo, "Gemini"
+
         except ResourceExhausted as e:
             delay = calcular_delay(tentativa, str(e))
             st.sidebar.warning(f"⚠️ Quota excedida (tentativa {tentativa + 1}/{MAX_RETRIES}). Aguardando {delay}s...")
@@ -316,7 +331,9 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
                 st.sidebar.warning(f"⚠️ Erro Gemini (tentativa {tentativa + 1}/{MAX_RETRIES}): {str(e)}")
                 time.sleep(MIN_RETRY_DELAY)
             else:
+                # Retorna erro formatado para não quebrar o worker
                 return {"error": str(e)}, False, 0, "Gemini"
+    
     return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
 def processar_pagina_worker(job_data):
     """Função executada em paralelo para processar uma página"""
@@ -559,7 +576,7 @@ if uploaded_files and process_btn:
             processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "System"))
 
     # 2. Executar em Paralelo
-    MAX_WORKERS = 4  # Número de processamentos simultâneos (seguro)
+    MAX_WORKERS = 2  # Número de processamentos simultâneos (seguro)
     processed_count = 0
     total_jobs = len(jobs) if jobs else 1
     
