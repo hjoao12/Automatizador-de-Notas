@@ -245,6 +245,15 @@ def limpar_numero(numero: str) -> str:
         return "0"
     numero = re.sub(r"[^\d]", "", str(numero))
     return numero.lstrip("0") or "0"
+    
+def limpar_para_nome_arquivo(texto):
+    """Remove caracteres proibidos pelo sistema operacional"""
+    if not texto: return "DESCONHECIDO"
+    # Remove caracteres proibidos no Windows: \ / : * ? " < > |
+    texto = re.sub(r'[\\/*?:"<>|]', "", texto)
+    # Remove acentos e caracteres estranhos
+    texto = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII")
+    return texto.strip()[:60] # Limita a 60 caracteres para não dar erro de path longo
 
 def validar_e_corrigir_dados(dados):
     """Valida e corrige dados extraídos da IA"""
@@ -547,8 +556,14 @@ if uploaded_files and process_btn:
     start_all = time.time()
 
     prompt = (
-        "Analise a nota fiscal (DANFE). Extraia emitente, número da nota e cidade. "
-        "Responda SOMENTE em JSON: {\"emitente\":\"NOME\",\"numero_nota\":\"NUMERO\",\"cidade\":\"CIDADE\"}"
+    "Você é um extrator de dados OCR. Analise esta página. "
+    "Extraia: 'emitente' (Nome fantasia principal), 'numero_nota' (Apenas dígitos) e 'cidade'. "
+    "REGRAS CRÍTICAS: "
+    "1. Se não encontrar o número da nota explicitamente, retorne null. "
+    "2. Se não encontrar o emitente, retorne null. "
+    "Responda EXCLUSIVAMENTE o JSON bruto (sem markdown ```json): "
+    "{\"emitente\": \"string ou null\", \"numero_nota\": \"string ou null\", \"cidade\": \"string ou null\"}"
+
     )
 
 # --- INÍCIO DO BLOCO NOVO (TURBO) ---
@@ -658,7 +673,9 @@ if uploaded_files and process_btn:
                     writer.add_page(p)
             except Exception:
                 continue
-        nome_pdf = f"DOC {numero}_{emitente}.pdf"
+                # Garante que o nome do arquivo seja seguro
+        emitente_safe = limpar_para_nome_arquivo(emitente)
+        nome_pdf = f"DOC {numero}_{emitente_safe}.pdf"
         caminho = session_folder / nome_pdf
         with open(caminho, "wb") as f_out:
             writer.write(f_out)
@@ -680,6 +697,27 @@ if uploaded_files and process_btn:
     
     # Mostrar dashboard após processamento
     criar_dashboard_analitico()
+with col4:
+        erros = len([log for log in logs if log[2] != "OK"])
+        st.metric("❌ Erros", erros)
+    
+    # --- NOVO BLOCO: TEMPO ECONOMIZADO ---
+    st.markdown("---")
+    col_tempo_1, col_tempo_2 = st.columns([1, 3])
+    with col_tempo_1:
+        # Estimativa: Um humano leva cerca de 2 minutos para abrir, ler, renomear e salvar um PDF.
+        minutos_economizados = total_paginas * 2 
+        horas = minutos_economizados // 60
+        mins = minutos_economizados % 60
+        
+        st.metric(
+            label="⏱️ Tempo Humano Economizado",
+            value=f"{horas}h {mins}min",
+            help="Baseado em uma estimativa de 2 min de trabalho manual por página."
+        )
+    with col_tempo_2:
+        st.info("💡 **Dica:** O tempo economizado considera a leitura, renomeação e organização manual que você deixou de fazer.")
+    # -------------------------------------
     
     st.rerun()
 
