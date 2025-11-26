@@ -12,7 +12,7 @@ import pickle
 import base64
 from streamlit_pdf_viewer import pdf_viewer
 from pathlib import Path
-from PyPdf import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
