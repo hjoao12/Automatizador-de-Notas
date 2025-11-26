@@ -700,22 +700,20 @@ if uploaded_files and process_btn:
 with col4:
         erros = len([log for log in logs if log[2] != "OK"])
         st.metric("❌ Erros", erros)
-    
     # --- NOVO BLOCO: TEMPO ECONOMIZADO ---
 st.markdown("---")
-    col_tempo_1, col_tempo_2 = st.columns([1, 3])
-    with col_tempo_1:
-        # Estimativa: Um humano leva cerca de 2 minutos para abrir, ler, renomear e salvar um PDF.
-        minutos_economizados = total_paginas * 2 
-        horas = minutos_economizados // 60
-        mins = minutos_economizados % 60
-        
-        st.metric(
+col_tempo_1, col_tempo_2 = st.columns([1, 3])
+with col_tempo_1:
+    # Estimativa: Um humano leva cerca de 2 minutos para abrir, ler, renomear e salvar um PDF.
+ minutos_economizados = total_paginas * 2 
+horas = minutos_economizados // 60
+ mins = minutos_economizados % 60
+    st.metric(
             label="⏱️ Tempo Humano Economizado",
             value=f"{horas}h {mins}min",
             help="Baseado em uma estimativa de 2 min de trabalho manual por página."
         )
-    with col_tempo_2:
+with col_tempo_2:
         st.info("💡 **Dica:** O tempo economizado considera a leitura, renomeação e organização manual que você deixou de fazer.")
     # -------------------------------------
     
