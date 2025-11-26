@@ -555,19 +555,17 @@ if uploaded_files and process_btn:
     progresso_text = st.empty()
     start_all = time.time()
 
+    # --- PROMPT ATUALIZADO ---
     prompt = (
-    "Você é um extrator de dados OCR. Analise esta página. "
-    "Extraia: 'emitente' (Nome fantasia principal), 'numero_nota' (Apenas dígitos) e 'cidade'. "
-    "REGRAS CRÍTICAS: "
-    "1. Se não encontrar o número da nota explicitamente, retorne null. "
-    "2. Se não encontrar o emitente, retorne null. "
-    "Responda EXCLUSIVAMENTE o JSON bruto (sem markdown ```json): "
-    "{\"emitente\": \"string ou null\", \"numero_nota\": \"string ou null\", \"cidade\": \"string ou null\"}"
-
+        "Você é um extrator de dados OCR. Analise esta página. "
+        "Extraia: 'emitente' (Nome fantasia principal), 'numero_nota' (Apenas dígitos) e 'cidade'. "
+        "REGRAS CRÍTICAS: "
+        "1. Se não encontrar o número da nota explicitamente, retorne null. "
+        "2. Se não encontrar o emitente, retorne null. "
+        "Responda EXCLUSIVAMENTE o JSON bruto (sem markdown ```json): "
+        "{\"emitente\": \"string ou null\", \"numero_nota\": \"string ou null\", \"cidade\": \"string ou null\"}"
     )
 
-# --- INÍCIO DO BLOCO NOVO (TURBO) ---
-    
     # 1. Preparar trabalhos (Jobs)
     jobs = []
     for a in arquivos:
@@ -593,7 +591,7 @@ if uploaded_files and process_btn:
             processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "System"))
 
     # 2. Executar em Paralelo
-    MAX_WORKERS = 2  # Número de processamentos simultâneos (seguro)
+    MAX_WORKERS = 4  # Aumentei para 4 para ser mais rápido (pode manter 2 se preferir)
     processed_count = 0
     total_jobs = len(jobs) if jobs else 1
     
@@ -623,7 +621,7 @@ if uploaded_files and process_btn:
                     tempo = result["tempo"]
                     provider = result["provider"]
                     
-                    # Validação e Correção (usando suas funções existentes)
+                    # Validação e Correção
                     dados = validar_e_corrigir_dados(dados)
                     
                     emitente_raw = dados.get("emitente", "") or ""
@@ -636,7 +634,6 @@ if uploaded_files and process_btn:
 
                     # Guardar para gerar o PDF final
                     key = (numero, emitente)
-                    # Importante: result["pdf_bytes"] contém a página individual
                     agrupados_bytes.setdefault(key, []).append(result["pdf_bytes"])
 
                     status_lbl = "CACHE" if result["status"] == "CACHE" else "OK"
@@ -659,7 +656,7 @@ if uploaded_files and process_btn:
             
             progress_bar.progress(min(processed_count/total_jobs, 1.0))
 
-    # --- FIM DO BLOCO NOVO ---
+    # 3. Gerar arquivos finais
     resultados = []
     files_meta = {}
     for (numero, emitente), pages_bytes in agrupados_bytes.items():
@@ -673,9 +670,12 @@ if uploaded_files and process_btn:
                     writer.add_page(p)
             except Exception:
                 continue
-                # Garante que o nome do arquivo seja seguro
+        
+        # --- APLICAÇÃO DA CORREÇÃO DE SEGURANÇA NO NOME ---
         emitente_safe = limpar_para_nome_arquivo(emitente)
         nome_pdf = f"DOC {numero}_{emitente_safe}.pdf"
+        # --------------------------------------------------
+
         caminho = session_folder / nome_pdf
         with open(caminho, "wb") as f_out:
             writer.write(f_out)
@@ -695,30 +695,10 @@ if uploaded_files and process_btn:
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s — {len(resultados)} arquivos gerados.")
     
-    # Mostrar dashboard após processamento
+    # Mostrar dashboard após processamento (Chamada limpa, sem erros de indentação)
     criar_dashboard_analitico()
-with col4:
-        erros = len([log for log in logs if log[2] != "OK"])
-        st.metric("❌ Erros", erros)
-    # --- NOVO BLOCO: TEMPO ECONOMIZADO ---
-st.markdown("---")
-col_tempo_1, col_tempo_2 = st.columns([1, 3])
-with col_tempo_1:
-    # Estimativa: Um humano leva cerca de 2 minutos para abrir, ler, renomear e salvar um PDF.
- minutos_economizados = total_paginas * 2 
-horas = minutos_economizados // 60
- mins = minutos_economizados % 60
-    st.metric(
-            label="⏱️ Tempo Humano Economizado",
-            value=f"{horas}h {mins}min",
-            help="Baseado em uma estimativa de 2 min de trabalho manual por página."
-        )
-with col_tempo_2:
-        st.info("💡 **Dica:** O tempo economizado considera a leitura, renomeação e organização manual que você deixou de fazer.")
-    # -------------------------------------
     
     st.rerun()
-
 
 # =====================================================================
 # PAINEL CORPORATIVO - COM AGRUPAMENTO E VISUALIZAÇÃO
