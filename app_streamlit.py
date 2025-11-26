@@ -9,6 +9,7 @@ import unicodedata
 import re
 import hashlib
 import pickle
+import base64
 from pathlib import Path
 from PyPDF2 import PdfReader, PdfWriter
 import google.generativeai as genai
@@ -681,8 +682,9 @@ if uploaded_files and process_btn:
     
     st.rerun()
 
+
 # =====================================================================
-# PAINEL CORPORATIVO - COM SISTEMA DE GERENCIAMENTO CORRIGIDO
+# PAINEL CORPORATIVO - COM AGRUPAMENTO E VISUALIZAÇÃO
 # =====================================================================
 if "resultados" in st.session_state:
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -692,7 +694,8 @@ if "resultados" in st.session_state:
     novos_nomes = st.session_state.get("novos_nomes", {r["file"]: r["file"] for r in resultados})
     files_meta = st.session_state.get("files_meta", {})
 
-    col1, col2, col3, col4 = st.columns([3,2,2,2])
+    # Ajustei as colunas para caber o novo botão
+    col1, col2, col3, col4 = st.columns([3, 2, 2, 3]) 
     with col1:
         q = st.text_input("🔎 Buscar arquivo ou emitente", value="", placeholder="parte do nome, emitente ou número")
     with col2:
@@ -700,44 +703,84 @@ if "resultados" in st.session_state:
     with col3:
         show_logs = st.checkbox("Mostrar logs detalhados", value=False)
     with col4:
-        if st.button("⬇️ Baixar Selecionadas"):
-            sel = st.session_state.get("selected_files", [])
-            if not sel:
-                st.warning("Nenhuma nota selecionada para download.")
-            else:
-                mem = io.BytesIO()
-                with zipfile.ZipFile(mem, "w") as zf:
+        st.write("") # Espaçamento
+        top_actions_cols = st.columns([1, 1, 1])
+        
+        # Botão Baixar
+        with top_actions_cols[0]:
+            if st.button("⬇️ Zip"):
+                sel = st.session_state.get("selected_files", [])
+                if not sel:
+                    st.warning("Selecione itens.")
+                else:
+                    mem = io.BytesIO()
+                    with zipfile.ZipFile(mem, "w") as zf:
+                        for f in sel:
+                            src = session_folder / f
+                            if src.exists():
+                                arcname = novos_nomes.get(f, f)
+                                zf.write(src, arcname=arcname)
+                    mem.seek(0)
+                    st.download_button("💾 Salvar", data=mem, file_name="selecionadas.zip", mime="application/zip")
+
+        # Botão Excluir
+        with top_actions_cols[1]:
+            if st.button("🗑️ Del"):
+                sel = st.session_state.get("selected_files", [])
+                if not sel:
+                    st.warning("Selecione itens.")
+                else:
                     for f in sel:
                         src = session_folder / f
-                        if src.exists():
-                            arcname = novos_nomes.get(f, f)
-                            zf.write(src, arcname=arcname)
-                mem.seek(0)
-                st.download_button("⬇️ Clique novamente para confirmar download", data=mem, file_name="selecionadas.zip", mime="application/zip")
-        if st.button("🗑️ Excluir Selecionadas"):
-            sel = st.session_state.get("selected_files", [])
-            if not sel:
-                st.warning("Nenhuma nota selecionada para exclusão.")
-            else:
-                count = 0
-                for f in sel:
-                    src = session_folder / f
-                    try:
-                        if src.exists():
-                            src.unlink()
-                    except Exception:
-                        pass
-                    st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != f]
-                    if f in st.session_state.get("novos_nomes", {}):
+                        try:
+                            if src.exists(): src.unlink()
+                        except: pass
+                        st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != f]
                         st.session_state["novos_nomes"].pop(f, None)
-                    if f in st.session_state.get("files_meta", {}):
                         st.session_state["files_meta"].pop(f, None)
-                    count += 1
-                st.success(f"{count} arquivo(s) excluído(s).")
-                st.rerun()
+                    st.session_state["selected_files"] = []
+                    st.success("Excluídos!")
+                    st.rerun()
+
+        # ### NOVO: Botão Agrupar
+        with top_actions_cols[2]:
+            if st.button("🔗 Unir"):
+                sel = st.session_state.get("selected_files", [])
+                if len(sel) < 2:
+                    st.warning("Selecione + de 1")
+                else:
+                    try:
+                        merger = PdfWriter()
+                        # Ordena a seleção para garantir ordem lógica
+                        sel_sorted = sorted(sel)
+                        
+                        for fname in sel_sorted:
+                            src = session_folder / fname
+                            if src.exists():
+                                reader = PdfReader(str(src))
+                                for page in reader.pages:
+                                    merger.add_page(page)
+                        
+                        new_name = f"AGRUPADO_{int(time.time())}.pdf"
+                        out_path = session_folder / new_name
+                        with open(out_path, "wb") as f:
+                            merger.write(f)
+                        
+                        # Adiciona ao estado
+                        new_meta = {
+                            "file": new_name, "numero": "AGRUP", "emitente": "VÁRIOS", "pages": len(merger.pages)
+                        }
+                        st.session_state["resultados"].insert(0, new_meta) # Insere no topo
+                        st.session_state["files_meta"][new_name] = new_meta
+                        st.session_state["novos_nomes"][new_name] = new_name
+                        st.success("Agrupado!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro: {e}")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+    # Filtragem e Ordenação
     visible = resultados.copy()
     if q:
         q_up = q.strip().upper()
@@ -754,14 +797,13 @@ if "resultados" in st.session_state:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("### 📁 Notas processadas")
     
-    # Inicializar selected_files se não existir
     if "selected_files" not in st.session_state:
         st.session_state["selected_files"] = []
 
     for r in visible:
         fname = r["file"]
         meta = files_meta.get(fname, {})
-        cols = st.columns([0.06, 0.48, 0.28, 0.18])
+        cols = st.columns([0.05, 0.50, 0.25, 0.20])
         
         checked = fname in st.session_state.get("selected_files", [])
         cb = cols[0].checkbox("", value=checked, key=f"cb_{fname}")
@@ -771,62 +813,53 @@ if "resultados" in st.session_state:
         if (not cb) and fname in st.session_state["selected_files"]:
             st.session_state["selected_files"].remove(fname)
 
-        novos_nomes[fname] = cols[1].text_input(label=fname, value=novos_nomes.get(fname, fname), key=f"rename_input_{fname}")
+        novos_nomes[fname] = cols[1].text_input(label=fname, value=novos_nomes.get(fname, fname), key=f"rename_input_{fname}", label_visibility="collapsed")
 
         emit = meta.get("emitente", r.get("emitente", "-"))
         num = meta.get("numero", r.get("numero", "-"))
-        cols[2].markdown(f"<div class='small-note'>{emit}  •  Nº {num}  •  {r.get('pages',1)} pág(s)</div>", unsafe_allow_html=True)
+        cols[2].markdown(f"<div class='small-note'>{emit}<br>Nº {num} • {r.get('pages',1)} pág(s)</div>", unsafe_allow_html=True)
 
         action_col = cols[3]
-        action = action_col.selectbox("", options=["...", "Remover (mover p/ lixeira)", "Baixar este arquivo"], key=f"action_{fname}", index=0)
-        
-        # Botão Gerenciar - CORRIGIDO
         if action_col.button("⚙️ Gerenciar", key=f"manage_{fname}"):
             st.session_state["_manage_target"] = fname
             st.rerun()
 
-        if action == "Remover (mover p/ lixeira)":
-            src = session_folder / fname
-            try:
-                if src.exists():
-                    src.unlink()
-            except Exception:
-                pass
-            st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != fname]
-            if fname in st.session_state.get("novos_nomes", {}):
-                st.session_state["novos_nomes"].pop(fname, None)
-            if fname in st.session_state.get("files_meta", {}):
-                st.session_state["files_meta"].pop(fname, None)
-            st.success(f"{fname} removido.")
-            st.rerun()
-        elif action == "Baixar este arquivo":
-            src = session_folder / fname
-            if src.exists():
-                with open(src, "rb") as ff:
-                    data = ff.read()
-                st.download_button(f"⬇️ Baixar {fname}", data=data, file_name=novos_nomes.get(fname, fname), mime="application/pdf")
-            else:
-                st.warning("Arquivo não encontrado.")
-
     st.markdown("</div>", unsafe_allow_html=True)
 
     # =====================================================================
-    # PAINEL DE GERENCIAMENTO - CORRIGIDO
+    # PAINEL DE GERENCIAMENTO (COM VISUALIZAÇÃO)
     # =====================================================================
     if "_manage_target" in st.session_state:
         manage_target = st.session_state["_manage_target"]
         
-        # Verificar se o arquivo ainda existe
         if not any(r["file"] == manage_target for r in st.session_state.get("resultados", [])):
             st.session_state.pop("_manage_target", None)
             st.rerun()
         
         st.markdown('<div class="manage-panel">', unsafe_allow_html=True)
-        st.markdown(f"### ⚙️ Gerenciar: `{manage_target}`")
+        col_tit, col_x = st.columns([0.9, 0.1])
+        col_tit.markdown(f"### ⚙️ Gerenciar: `{manage_target}`")
+        if col_x.button("❌", key=f"close_main_{manage_target}"):
+            st.session_state.pop("_manage_target", None)
+            st.rerun()
         
         file_path = session_folder / manage_target
         
-        # Obter informações das páginas
+        # ### NOVO: VISUALIZADOR DE PDF ###
+        with st.expander("👁️ Clique aqui para Visualizar o PDF", expanded=False):
+            if file_path.exists():
+                try:
+                    with open(file_path, "rb") as f:
+                        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+                    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="600" type="application/pdf"></iframe>'
+                    st.markdown(pdf_display, unsafe_allow_html=True)
+                except Exception as e:
+                    st.error(f"Erro ao visualizar: {e}")
+            else:
+                st.warning("Arquivo não encontrado.")
+        # #################################
+
+        # (Código original de separar páginas continua aqui...)
         try:
             reader = PdfReader(str(file_path))
             total_pages = len(reader.pages)
@@ -837,9 +870,6 @@ if "resultados" in st.session_state:
             total_pages = 0
         
         if pages_info:
-            st.info(f"📄 O arquivo possui **{total_pages} página(s)**")
-            
-            # Inicializar seleção de páginas
             sel_key = f"_manage_sel_{manage_target}"
             if sel_key not in st.session_state:
                 st.session_state[sel_key] = []
@@ -858,12 +888,11 @@ if "resultados" in st.session_state:
                             st.session_state[sel_key].remove(page["idx"])
             
             with col_actions:
-                st.markdown("**Ações:**")
+                st.markdown("**Ações Avançadas:**")
                 
                 selected_count = len(st.session_state.get(sel_key, []))
-                st.write(f"📑 Páginas selecionadas: **{selected_count}**")
+                st.write(f"📑 Selecionadas: **{selected_count}**")
                 
-                # Nome para novo arquivo
                 new_name_key = f"_manage_newname_{manage_target}"
                 if new_name_key not in st.session_state:
                     base_name = manage_target.rsplit('.pdf', 1)[0]
@@ -871,103 +900,70 @@ if "resultados" in st.session_state:
                 
                 new_name = st.text_input("Nome do novo PDF:", key=new_name_key)
                 
-                col_sep, col_rem, col_close = st.columns(3)
+                col_sep, col_rem = st.columns(2)
                 
                 with col_sep:
                     if st.button("➗ Separar páginas", key=f"sep_{manage_target}"):
                         selected = sorted(st.session_state.get(sel_key, []))
                         if not selected:
-                            st.warning("Selecione pelo menos uma página para separar.")
+                            st.warning("Selecione páginas.")
                         else:
                             try:
-                                # Criar novo PDF com páginas selecionadas
                                 new_writer = PdfWriter()
                                 reader = PdfReader(str(file_path))
-                                
                                 for page_idx in selected:
                                     if 0 <= page_idx < len(reader.pages):
                                         new_writer.add_page(reader.pages[page_idx])
-                                
-                                # Salvar novo arquivo
                                 new_path = session_folder / new_name
                                 with open(new_path, "wb") as f:
                                     new_writer.write(f)
                                 
-                                # Adicionar aos resultados
                                 new_meta = {
                                     "file": new_name,
                                     "numero": files_meta.get(manage_target, {}).get("numero", ""),
                                     "emitente": files_meta.get(manage_target, {}).get("emitente", ""),
                                     "pages": len(selected)
                                 }
-                                
                                 st.session_state["resultados"].append(new_meta)
-                                st.session_state["files_meta"][new_name] = {
-                                    "numero": new_meta["numero"],
-                                    "emitente": new_meta["emitente"], 
-                                    "pages": new_meta["pages"]
-                                }
+                                st.session_state["files_meta"][new_name] = new_meta
                                 st.session_state["novos_nomes"][new_name] = new_name
-                                
-                                st.success(f"✅ Arquivo separado criado: `{new_name}`")
-                                st.session_state[sel_key] = []  # Limpar seleção
-                                
+                                st.success(f"Criado: `{new_name}`")
+                                st.session_state[sel_key] = [] 
                             except Exception as e:
-                                st.error(f"❌ Erro ao separar páginas: {str(e)}")
+                                st.error(f"Erro: {str(e)}")
                 
                 with col_rem:
                     if st.button("🗑️ Remover páginas", key=f"rem_{manage_target}"):
                         selected = sorted(st.session_state.get(sel_key, []))
                         if not selected:
-                            st.warning("Selecione páginas para remover.")
+                            st.warning("Selecione páginas.")
                         else:
                             try:
-                                # Criar novo PDF sem as páginas selecionadas
                                 new_writer = PdfWriter()
                                 reader = PdfReader(str(file_path))
-                                
                                 for page_idx in range(len(reader.pages)):
                                     if page_idx not in selected:
                                         new_writer.add_page(reader.pages[page_idx])
                                 
-                                # Se sobrou alguma página, salvar o arquivo
                                 if len(new_writer.pages) > 0:
                                     with open(file_path, "wb") as f:
                                         new_writer.write(f)
-                                    
-                                    # Atualizar metadados
                                     st.session_state["files_meta"][manage_target]["pages"] = len(new_writer.pages)
                                     for r in st.session_state["resultados"]:
                                         if r["file"] == manage_target:
                                             r["pages"] = len(new_writer.pages)
-                                    
-                                    st.success(f"✅ {len(selected)} página(s) removida(s)")
+                                    st.success(f"Páginas removidas.")
                                 else:
-                                    # Se não sobrou nenhuma página, excluir o arquivo
                                     file_path.unlink()
                                     st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != manage_target]
                                     st.session_state["files_meta"].pop(manage_target, None)
                                     st.session_state["novos_nomes"].pop(manage_target, None)
-                                    st.success(f"📭 Arquivo `{manage_target}` foi excluído (ficou vazio)")
                                     st.session_state.pop("_manage_target", None)
-                                
-                                st.session_state[sel_key] = []  # Limpar seleção
+                                    st.rerun()
+                                st.session_state[sel_key] = []
                                 st.rerun()
-                                
                             except Exception as e:
-                                st.error(f"❌ Erro ao remover páginas: {str(e)}")
-                
-                with col_close:
-                    if st.button("❌ Fechar", key=f"close_{manage_target}"):
-                        st.session_state.pop("_manage_target", None)
-                        st.session_state.pop(sel_key, None)
-                        st.rerun()
-        
-        else:
-            st.warning("Não foi possível carregar as páginas do arquivo.")
-            if st.button("❌ Fechar", key=f"close_err_{manage_target}"):
-                st.session_state.pop("_manage_target", None)
-                st.rerun()
+                                st.error(f"Erro: {str(e)}")
         
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -977,11 +973,11 @@ if "resultados" in st.session_state:
     # Mostrar logs se solicitado
     if show_logs and st.session_state.get("processed_logs"):
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("### 📝 Logs de processamento (últimas páginas)")
+        st.markdown("### 📝 Logs")
         for entry in st.session_state["processed_logs"][-200:]:
             label, t, status, info, provider = (entry + ("", "", ""))[:5]
             if status == "OK":
-                st.markdown(f"<div class='success-log'>✅ {label} — {info} — {t:.2f}s</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='success-log'>✅ {label} — {info}</div>", unsafe_allow_html=True)
             else:
                 st.markdown(f"<div class='warning-log'>⚠️ {label} — {info}</div>", unsafe_allow_html=True)
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1000,9 +996,7 @@ if "resultados" in st.session_state:
                     if src.exists():
                         zf.write(src, arcname=st.session_state.get("novos_nomes", {}).get(fname, fname))
             mem.seek(0)
-            st.download_button("⬇️ Clique para baixar (ZIP)", data=mem, file_name="notas_processadas.zip", mime="application/zip")
-    with col_dl_b:
-        st.markdown("<div class='small-note'>Dica: edite nomes na lista e use 'Baixar Selecionadas' para baixar apenas o que precisar.</div>", unsafe_allow_html=True)
+            st.download_button("⬇️ ZIP Completo", data=mem, file_name="todas_notas.zip", mime="application/zip")
 
 else:
     st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
