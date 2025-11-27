@@ -188,7 +188,14 @@ def load_patterns():
         "PETRÓLEO BRASILEIRO S.A": "PETROBRAS",
         "PETROLEO BRASILEIRO S.A": "PETROBRAS",
         "NEOENERGIA": "NEOENERGIA",
-        "EQUATORIAL": "EQUATORIAL"
+        "EQUATORIAL": "EQUATORIAL",
+        "INNOVATIVE WATER CARE": "SIGURA", 
+        "COMERCIAL E IMPORTADORA DE PNEUS": "CAMPNEUS",
+        "URP CARGAS E LOGISTICA":"URP",
+        "M.F DE MELO FILHO": "MF_DE_MELO",
+        "EXPRESS TCM": "EXPRESS_TCM",
+        "MDM RENOVADORA DE PNEUS": "MDM_RENOVADORA",
+        "EKIPE TEC DE SEG E INCENDIO": "EKIPE",
         # ... adicione outros essenciais aqui se quiser garantir que sempre existam no reset
     }
 
