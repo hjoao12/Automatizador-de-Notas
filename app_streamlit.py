@@ -397,6 +397,7 @@ def processar_pagina_worker(job_data):
             "pdf_bytes": pdf_bytes
         }
     else:
+        # ALTERAÇÃO AQUI: Retornamos o pdf_bytes também no erro
         return {
             "status": "ERRO",
             "dados": dados,
@@ -404,7 +405,8 @@ def processar_pagina_worker(job_data):
             "provider": provider,
             "name": name,
             "page_idx": page_idx,
-            "error_msg": dados.get("error", "Erro desconhecido")
+            "error_msg": dados.get("error", "Erro desconhecido"),
+            "pdf_bytes": pdf_bytes  # Devolver o arquivo mesmo com erro
         }
 
 # =====================================================================
@@ -616,48 +618,74 @@ if uploaded_files and process_btn:
                 idx = result["page_idx"]
                 page_label = f"{name} (pág {idx+1})"
                 
+                # --- LÓGICA MODIFICADA PARA NÃO DESCARTAR ERROS ---
                 if result["status"] == "ERRO":
+                    # Loga o erro, mas define dados padrão para não perder o arquivo
                     processed_logs.append((page_label, result["tempo"], "ERRO_IA", result["error_msg"], result["provider"]))
-                    progresso_text.markdown(f"<span class='warning-log'>⚠️ {page_label} — ERRO</span>", unsafe_allow_html=True)
+                    progresso_text.markdown(f"<span class='error-log'>⚠️ {page_label} — FALHA (Salvo para revisão)</span>", unsafe_allow_html=True)
+                    
+                    # Define dados para criar o arquivo "REVISAR"
+                    dados = {
+                        "emitente": f"REVISAR_{name}", # Nome do arquivo original para você achar fácil
+                        "numero_nota": "000",          # Número 0 para ficar no topo ou fim da lista
+                        "cidade": ""
+                    }
                 else:
                     dados = result["dados"]
                     dados = validar_e_corrigir_dados(dados)
-                    
-                    emitente_raw = dados.get("emitente", "") or ""
-                    numero_raw = dados.get("numero_nota", "") or ""
-                    cidade_raw = dados.get("cidade", "") or ""
-
-                    numero = limpar_numero(numero_raw)
-                    nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
-                    emitente = limpar_emitente(nome_map)
-
-                    # AQUI ESTÁ O SEGREDO: 
-                    # Guardamos um dicionário com o ID da página, e não só os bytes
-                    key = (numero, emitente)
-                    agrupados_dados.setdefault(key, []).append({
-                        "page_idx": idx,          # Guardamos a ordem original
-                        "pdf_bytes": result["pdf_bytes"],
-                        "file_origin": name       # Útil se processar vários arquivos juntos
-                    })
-
                     status_lbl = "CACHE" if result["status"] == "CACHE" else "OK"
                     css_class = "success-log" if result["status"] == "OK" else "warning-log"
                     
-                    processed_logs.append((page_label, result["tempo"], status_lbl, f"{numero} / {emitente}", result["provider"]))
-                    resultados_meta.append({
-                        "arquivo_origem": name,
-                        "pagina": idx+1,
-                        "emitente_detectado": emitente_raw,
-                        "numero_detectado": numero_raw,
-                        "status": status_lbl,
-                        "tempo_s": round(result["tempo"], 2),
-                        "provider": result["provider"]
-                    })
+                    emitente_raw = dados.get("emitente", "") or "DESCONHECIDO"
+                    numero_raw = dados.get("numero_nota", "") or "000"
+                    processed_logs.append((page_label, result["tempo"], status_lbl, f"{numero_raw} / {emitente_raw}", result["provider"]))
                     progresso_text.markdown(f"<span class='{css_class}'>✅ {page_label} — {status_lbl}</span>", unsafe_allow_html=True)
+
+                # --- PROCESSAMENTO COMUM PARA ERROS E SUCESSOS ---
+                emitente_raw = dados.get("emitente", "") or f"REVISAR_{idx}"
+                numero_raw = dados.get("numero_nota", "") or "000"
+                cidade_raw = dados.get("cidade", "") or ""
+
+                numero = limpar_numero(numero_raw)
+                
+                # Se for erro ou revisão, não tenta substituir nome
+                if result["status"] == "ERRO" or numero == "0":
+                     emitente = emitente_raw 
+                else:
+                     nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
+                     emitente = limpar_emitente(nome_map)
+
+                # Para evitar que erros de arquivos diferentes se misturem no mesmo PDF,
+                # se for erro (numero 0), adicionamos o ID da página na chave
+                if numero == "0" or numero == "000":
+                    key = (f"000_REV_{idx}", emitente) # Chave única para erros
+                else:
+                    key = (numero, emitente)
+
+                agrupados_dados.setdefault(key, []).append({
+                    "page_idx": idx,
+                    "pdf_bytes": result["pdf_bytes"],
+                    "file_origin": name
+                })
+
+                # Adiciona log para métricas (mesmo se falhou, conta como processado)
+                if result["status"] == "ERRO":
+                     status_final = "FALHA_SALVA"
+                else:
+                     status_final = "CACHE" if result["status"] == "CACHE" else "OK"
+
+                resultados_meta.append({
+                    "arquivo_origem": name,
+                    "pagina": idx+1,
+                    "emitente_detectado": emitente_raw,
+                    "numero_detectado": numero_raw,
+                    "status": status_final,
+                    "tempo_s": round(result["tempo"], 2),
+                    "provider": result["provider"]
+                })
 
             except Exception as e:
                 st.error(f"Erro crítico: {e}")
-            
             progress_bar.progress(min(processed_count/total_jobs, 1.0))
 
     # 3. Gerar arquivos finais (COM ORDENAÇÃO CORRIGIDA)
@@ -667,7 +695,11 @@ if uploaded_files and process_btn:
     for (numero, emitente), pages_list in agrupados_dados.items():
         if not numero or numero == "0":
             continue
-            
+        #se for nossa chave de erro criada acima (ex: 000_REV_1), limpamos para o nome do arquivo ficar bonito
+        if "REV_" in str(numero):
+             numero_display = "000_REVISAR"
+        else:
+             numero_display = numero   
         # --- A CORREÇÃO MÁGICA ---
         # Ordena a lista de páginas baseada no 'page_idx' (número da página original)
         # Isso garante que a Página 1 venha antes da Página 2, mesmo que a 2 tenha sido processada antes.
