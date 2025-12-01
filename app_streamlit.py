@@ -1071,7 +1071,7 @@ if "resultados" in st.session_state:
                 use_container_width=True
             )
 
-    # --- OPÇÃO B: SALVAR SOLTOS ---
+# --- OPÇÃO B: SALVAR SOLTOS ---
     with col_opt2:
         st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
         st.caption("Copia os arquivos soltos diretamente para uma pasta do seu PC.")
@@ -1133,9 +1133,3 @@ if "resultados" in st.session_state:
                 except Exception as e:
                     st.error(f"❌ Erro crítico ao acessar a pasta: {e}")
                     st.info("Dica: Tente criar uma pasta simples como 'C:\\Notas' e colocar ali para testar.")
-                    
-            except Exception as e:
-                st.error(f"Erro ao salvar: {e}")
-
-else:
-    st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
