@@ -1071,43 +1071,68 @@ if "resultados" in st.session_state:
                 use_container_width=True
             )
 
-    # --- OPÇÃO 2: SALVAR SOLTOS (Direto no PC) ---
+    # --- OPÇÃO B: SALVAR SOLTOS ---
     with col_opt2:
-        st.success("📂 **Opção B: Salvar Soltos**")
-        st.caption("Salva todos os arquivos PDF diretamente numa pasta do seu PC.")
+        st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
+        st.caption("Copia os arquivos soltos diretamente para uma pasta do seu PC.")
         
-        # Define um caminho padrão (Cria uma pasta 'Notas_Saida' onde o script está)
-        pasta_padrao = os.path.join(os.getcwd(), "Notas_Finalizadas")
-        caminho_destino = st.text_input("Pasta de Destino:", value=pasta_padrao)
+        # --- CORREÇÃO AQUI: DETECTA AUTOMATICAMENTE A PASTA DOWNLOADS ---
+        try:
+            # Pega o caminho do usuário atual (ex: C:\Users\joao.silva) e adiciona "Downloads"
+            pasta_downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+        except:
+            pasta_downloads = "C:\\" # Fallback se der erro
+            
+        caminho_destino = st.text_input("Pasta de Destino:", value=pasta_downloads)
         
         if st.button("🚀 Salvar Arquivos Soltos", use_container_width=True):
-            try:
-                dest_path = Path(caminho_destino)
-                dest_path.mkdir(parents=True, exist_ok=True)
-                
-                count = 0
-                for r in st.session_state.get("resultados", []):
-                    fname = r["file"]
-                    src = session_folder / fname
-                    
-                    if src.exists():
-                        nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
-                        # Garante que termina com .pdf
-                        if not nome_final.lower().endswith(".pdf"):
-                            nome_final += ".pdf"
-                            
-                        dst = dest_path / nome_final
-                        shutil.copy2(src, dst)
-                        count += 1
-                
-                st.balloons()
-                st.success(f"✅ Sucesso! {count} arquivos salvos em:\n\n`{caminho_destino}`")
-                
-                # Abre a pasta no Windows Explorer para você ver
+            if not st.session_state.get("resultados"):
+                st.warning("Processe os arquivos primeiro!")
+            else:
                 try:
-                    os.startfile(caminho_destino)
-                except:
-                    pass
+                    dest_path = Path(caminho_destino)
+                    # Tenta criar a pasta se ela não existir (ex: se você mudar o nome ali)
+                    dest_path.mkdir(parents=True, exist_ok=True)
+                    
+                    count = 0
+                    erros_log = []
+                    
+                    for r in st.session_state.get("resultados", []):
+                        fname = r["file"]
+                        src = session_folder / fname
+                        
+                        if src.exists():
+                            nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
+                            # Garante extensão .pdf
+                            if not nome_final.lower().endswith(".pdf"):
+                                nome_final += ".pdf"
+                                
+                            dst = dest_path / nome_final
+                            
+                            try:
+                                shutil.copy2(src, dst)
+                                count += 1
+                            except Exception as e_copy:
+                                erros_log.append(f"{fname}: {str(e_copy)}")
+                    
+                    if count > 0:
+                        st.balloons()
+                        st.success(f"✅ Sucesso! {count} arquivos salvos em:\n\n`{caminho_destino}`")
+                        
+                        # Tenta abrir a pasta para você ver
+                        try:
+                            os.startfile(caminho_destino)
+                        except:
+                            st.info("Arquivos salvos, mas não consegui abrir a pasta automaticamente.")
+                    
+                    if erros_log:
+                        st.error(f"Houve erro ao salvar {len(erros_log)} arquivos.")
+                        with st.expander("Ver detalhes dos erros"):
+                            st.write(erros_log)
+                        
+                except Exception as e:
+                    st.error(f"❌ Erro crítico ao acessar a pasta: {e}")
+                    st.info("Dica: Tente criar uma pasta simples como 'C:\\Notas' e colocar ali para testar.")
                     
             except Exception as e:
                 st.error(f"Erro ao salvar: {e}")
