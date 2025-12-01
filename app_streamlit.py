@@ -1076,23 +1076,47 @@ if "resultados" in st.session_state:
         st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
         st.caption("Copia os arquivos soltos diretamente para uma pasta do seu PC.")
         
-        # --- CORREÇÃO AQUI: DETECTA AUTOMATICAMENTE A PASTA DOWNLOADS ---
-        try:
-            # Pega o caminho do usuário atual (ex: C:\Users\joao.silva) e adiciona "Downloads"
-            pasta_downloads = os.path.join(os.path.expanduser("~"), "Downloads")
-        except:
-            pasta_downloads = "C:\\" # Fallback se der erro
-            
-        caminho_destino = st.text_input("Pasta de Destino:", value=pasta_downloads)
+        # Define um valor inicial (Downloads) apenas na primeira vez
+        if "pasta_destino_padrao" not in st.session_state:
+            try:
+                st.session_state["pasta_destino_padrao"] = os.path.join(os.path.expanduser("~"), "Downloads")
+            except:
+                st.session_state["pasta_destino_padrao"] = "C:\\"
+
+        # Input de texto manual (O usuário pode colar o caminho aqui)
+        caminho_input = st.text_input(
+            "Cole o caminho da pasta aqui:", 
+            value=st.session_state["pasta_destino_padrao"],
+            key="input_pasta_manual",
+            help="Vá na pasta do Windows, clique com botão direito na barra de endereço, copie e cole aqui."
+        )
+
+        # --- LIMPEZA E VALIDAÇÃO DO CAMINHO ---
+        # 1. Remove aspas que o Windows às vezes adiciona ao copiar endereço
+        caminho_limpo = caminho_input.replace('"', '').replace("'", "").strip()
         
-        if st.button("🚀 Salvar Arquivos Soltos", use_container_width=True):
+        # 2. Valida se a pasta existe
+        caminho_valido = False
+        try:
+            path_obj = Path(caminho_limpo)
+            if path_obj.exists() and path_obj.is_dir():
+                st.markdown(f"<span style='color:green; font-size:12px'>✅ Pasta válida encontrada!</span>", unsafe_allow_html=True)
+                caminho_valido = True
+            elif not path_obj.exists():
+                st.markdown(f"<span style='color:orange; font-size:12px'>⚠️ A pasta não existe (será criada).</span>", unsafe_allow_html=True)
+                caminho_valido = True # Permitimos criar
+            else:
+                st.error("O caminho informado é um arquivo, não uma pasta.")
+        except Exception:
+            st.error("Caminho inválido.")
+
+        if st.button("🚀 Salvar Arquivos Soltos", use_container_width=True, disabled=not caminho_valido):
             if not st.session_state.get("resultados"):
                 st.warning("Processe os arquivos primeiro!")
             else:
                 try:
-                    dest_path = Path(caminho_destino)
-                    # Tenta criar a pasta se ela não existir (ex: se você mudar o nome ali)
-                    dest_path.mkdir(parents=True, exist_ok=True)
+                    dest_path = Path(caminho_limpo)
+                    dest_path.mkdir(parents=True, exist_ok=True) # Cria a pasta se não existir
                     
                     count = 0
                     erros_log = []
@@ -1103,7 +1127,6 @@ if "resultados" in st.session_state:
                         
                         if src.exists():
                             nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
-                            # Garante extensão .pdf
                             if not nome_final.lower().endswith(".pdf"):
                                 nome_final += ".pdf"
                                 
@@ -1117,19 +1140,18 @@ if "resultados" in st.session_state:
                     
                     if count > 0:
                         st.balloons()
-                        st.success(f"✅ Sucesso! {count} arquivos salvos em:\n\n`{caminho_destino}`")
+                        st.success(f"✅ Sucesso! {count} arquivos salvos em:\n\n`{caminho_limpo}`")
                         
-                        # Tenta abrir a pasta para você ver
+                        # Atualiza o estado para lembrar dessa pasta na próxima vez
+                        st.session_state["pasta_destino_padrao"] = caminho_limpo
+                        
                         try:
-                            os.startfile(caminho_destino)
+                            os.startfile(caminho_limpo)
                         except:
-                            st.info("Arquivos salvos, mas não consegui abrir a pasta automaticamente.")
+                            pass
                     
                     if erros_log:
-                        st.error(f"Houve erro ao salvar {len(erros_log)} arquivos.")
-                        with st.expander("Ver detalhes dos erros"):
-                            st.write(erros_log)
+                        st.error(f"Erros ao salvar: {erros_log}")
                         
                 except Exception as e:
-                    st.error(f"❌ Erro crítico ao acessar a pasta: {e}")
-                    st.info("Dica: Tente criar uma pasta simples como 'C:\\Notas' e colocar ali para testar.")
+                    st.error(f"❌ Erro ao acessar a pasta: {e}")
