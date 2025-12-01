@@ -1043,18 +1043,74 @@ if "resultados" in st.session_state:
     st.session_state["novos_nomes"] = novos_nomes
 
     st.markdown("---")
-    col_dl_a, col_dl_b = st.columns([1,3])
-    with col_dl_a:
-        if st.button("📦 Baixar tudo (ZIP)"):
+    st.markdown("### 📤 Opções de Saída")
+    
+    col_opt1, col_opt2 = st.columns(2)
+    
+    # --- OPÇÃO 1: BAIXAR ZIP (Para quem prefere um arquivo só) ---
+    with col_opt1:
+        st.info("📦 **Opção A: Baixar ZIP**")
+        st.caption("Ideal para enviar por e-mail ou guardar backup.")
+        if st.button("⬇️ Baixar Arquivo ZIP", use_container_width=True):
             mem = io.BytesIO()
             with zipfile.ZipFile(mem, "w") as zf:
                 for r in st.session_state.get("resultados", []):
                     fname = r["file"]
                     src = session_folder / fname
                     if src.exists():
-                        zf.write(src, arcname=st.session_state.get("novos_nomes", {}).get(fname, fname))
+                        # Usa o nome renomeado se houver
+                        nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
+                        zf.write(src, arcname=nome_final)
             mem.seek(0)
-            st.download_button("⬇️ ZIP Completo", data=mem, file_name="todas_notas.zip", mime="application/zip")
+            st.download_button(
+                label="Clique para Salvar ZIP", 
+                data=mem, 
+                file_name="todas_notas.zip", 
+                mime="application/zip", 
+                key="btn_zip_final",
+                use_container_width=True
+            )
+
+    # --- OPÇÃO 2: SALVAR SOLTOS (Direto no PC) ---
+    with col_opt2:
+        st.success("📂 **Opção B: Salvar Soltos**")
+        st.caption("Salva todos os arquivos PDF diretamente numa pasta do seu PC.")
+        
+        # Define um caminho padrão (Cria uma pasta 'Notas_Saida' onde o script está)
+        pasta_padrao = os.path.join(os.getcwd(), "Notas_Finalizadas")
+        caminho_destino = st.text_input("Pasta de Destino:", value=pasta_padrao)
+        
+        if st.button("🚀 Salvar Arquivos Soltos", use_container_width=True):
+            try:
+                dest_path = Path(caminho_destino)
+                dest_path.mkdir(parents=True, exist_ok=True)
+                
+                count = 0
+                for r in st.session_state.get("resultados", []):
+                    fname = r["file"]
+                    src = session_folder / fname
+                    
+                    if src.exists():
+                        nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
+                        # Garante que termina com .pdf
+                        if not nome_final.lower().endswith(".pdf"):
+                            nome_final += ".pdf"
+                            
+                        dst = dest_path / nome_final
+                        shutil.copy2(src, dst)
+                        count += 1
+                
+                st.balloons()
+                st.success(f"✅ Sucesso! {count} arquivos salvos em:\n\n`{caminho_destino}`")
+                
+                # Abre a pasta no Windows Explorer para você ver
+                try:
+                    os.startfile(caminho_destino)
+                except:
+                    pass
+                    
+            except Exception as e:
+                st.error(f"Erro ao salvar: {e}")
 
 else:
     st.info("Nenhum arquivo processado ainda. Faça upload e clique em 'Processar PDFs'.")
