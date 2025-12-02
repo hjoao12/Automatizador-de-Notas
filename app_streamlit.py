@@ -1042,7 +1042,7 @@ if "resultados" in st.session_state:
 
     st.session_state["novos_nomes"] = novos_nomes
 
-   st.markdown("---")
+    st.markdown("---")
     st.markdown("### 📤 Baixar Arquivos")
     
     # Prepara o buffer do zip na memória
