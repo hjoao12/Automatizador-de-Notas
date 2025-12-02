@@ -1071,45 +1071,64 @@ if "resultados" in st.session_state:
                 use_container_width=True
             )
 
-# --- OPÇÃO B: SALVAR EM PASTA EXISTENTE ---
+# --- OPÇÃO B: SELECIONAR PASTA VISUALMENTE ---
     with col_opt2:
         st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
-        st.caption("Salva os arquivos em uma pasta que JÁ EXISTE no seu PC.")
-        
-        # Tenta pegar o último caminho usado ou deixa vazio para você preencher
-        caminho_inicial = st.session_state.get("last_path", "")
-        
-        # Input de texto
-        caminho_input = st.text_input(
-            "Cole o caminho da pasta aqui:", 
-            value=caminho_inicial,
-            placeholder="Ex: C:\\Users\\Joao\\Downloads",
-            help="Copie o endereço da pasta no Windows e cole aqui."
-        )
+        st.caption("Escolha a pasta usando a janela do Windows.")
 
-        # --- VALIDAÇÃO ESTRITA ---
-        caminho_valido = False
+        # Importação necessária para abrir a janela (geralmente já vem no Python)
+        import tkinter as tk
+        from tkinter import filedialog
+
+        # Inicializa o estado se não existir
+        if "pasta_visual" not in st.session_state:
+            st.session_state["pasta_visual"] = os.getcwd()
+
+        # Botão para abrir o seletor
+        col_btn_sel, col_path_view = st.columns([0.3, 0.7])
         
-        if caminho_input:
-            # Limpa aspas e corrige barras
-            caminho_limpo = os.path.normpath(caminho_input.replace('"', '').replace("'", "").strip())
-            
-            if os.path.exists(caminho_limpo) and os.path.isdir(caminho_limpo):
-                st.markdown(f"<span style='color:green'>✅ Pasta encontrada! Pode salvar.</span>", unsafe_allow_html=True)
-                caminho_valido = True
-            else:
-                st.markdown(f"<span style='color:red'>❌ Pasta não encontrada. Verifique o caminho.</span>", unsafe_allow_html=True)
+        with col_btn_sel:
+            if st.button("📂 Abrir Seletor", help="Abre uma janela pop-up para escolher a pasta"):
+                try:
+                    # Cria uma janela invisível do Tkinter
+                    root = tk.Tk()
+                    root.withdraw() 
+                    root.wm_attributes('-topmost', 1) # Tenta forçar a janela para frente
+                    
+                    # Abre o explorador
+                    pasta_selecionada = filedialog.askdirectory(master=root)
+                    root.destroy()
+                    
+                    if pasta_selecionada:
+                        st.session_state["pasta_visual"] = pasta_selecionada
+                        st.rerun() # Recarrega para atualizar o campo ao lado
+                except Exception as e:
+                    st.error(f"Erro ao abrir seletor: {e}")
+
+        # Mostra o caminho selecionado
+        with col_path_view:
+            caminho_final = st.text_input(
+                "Pasta escolhida:", 
+                value=st.session_state["pasta_visual"],
+                key="display_path_visual",
+                disabled=True # Deixa travado para garantir que veio do seletor
+            )
+
+        # Validação Visual
+        pasta_ok = False
+        if os.path.exists(caminho_final) and os.path.isdir(caminho_final):
+            st.markdown(f"<span style='color:green'>✅ Caminho válido: {caminho_final}</span>", unsafe_allow_html=True)
+            pasta_ok = True
         else:
-            st.info("Cole um caminho acima para liberar o botão.")
+            st.markdown(f"<span style='color:red'>❌ Selecione uma pasta válida.</span>", unsafe_allow_html=True)
 
-        # O botão só fica habilitado se a pasta realmente existir
-        if st.button("🚀 Salvar Arquivos", use_container_width=True, disabled=not caminho_valido):
+        # Botão de Salvar
+        if st.button("🚀 Salvar Arquivos Agora", use_container_width=True, disabled=not pasta_ok):
             if not st.session_state.get("resultados"):
                 st.warning("Processe os arquivos primeiro!")
             else:
                 try:
-                    dest_path = Path(caminho_limpo)
-                    
+                    dest_path = Path(caminho_final)
                     count = 0
                     erros_log = []
                     
@@ -1131,11 +1150,9 @@ if "resultados" in st.session_state:
                     
                     if count > 0:
                         st.balloons()
-                        st.success(f"✅ Sucesso! {count} arquivos salvos em:\n\n`{caminho_limpo}`")
-                        st.session_state["last_path"] = caminho_limpo 
-                        
+                        st.success(f"✅ Sucesso! {count} arquivos salvos.")
                         try:
-                            os.startfile(caminho_limpo)
+                            os.startfile(caminho_final)
                         except:
                             pass
                     
@@ -1144,4 +1161,4 @@ if "resultados" in st.session_state:
                         st.write(erros_log)
                         
                 except Exception as e:
-                    st.error(f"❌ Erro ao salvar: {e}")
+                    st.error(f"Erro crítico: {e}")
