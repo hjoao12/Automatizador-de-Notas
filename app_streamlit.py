@@ -1070,68 +1070,136 @@ if "resultados" in st.session_state:
                 key="btn_zip_final",
                 use_container_width=True
             )
-# --- OPÇÃO B: SELECIONAR PASTA (COMPATÍVEL COM STREAMLIT) ---
-with col_opt2:
-    st.success("📂 **Opção B: Salvar na Pasta**")
-    st.caption("Escolha a pasta informando o caminho ou cole do Explorador do Windows.")
+# --- OPÇÃO B: SALVAR EM PASTA ESPECÍFICA (SEM ZIP) ---
+    with col_opt2:
+    st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
+    st.caption("Cole ou selecione um caminho válido do Windows.")
 
-    # Caminho padrão
-    if "pasta_visual" not in st.session_state:
-        st.session_state["pasta_visual"] = os.path.join(os.path.expanduser("~"), "Downloads")
+    # --- Função auxiliar para montar caminhos mais usados ---
+    def caminho_downloads():
+        return os.path.join(os.path.expanduser("~"), "Downloads")
 
+    def caminho_desktop():
+        return os.path.join(os.path.expanduser("~"), "Desktop")
+
+    def caminho_documentos():
+        return os.path.join(os.path.expanduser("~"), "Documents")
+
+    # --- Inicializa sessão ---
+    if "pasta_destino_padrao" not in st.session_state:
+        st.session_state["pasta_destino_padrao"] = caminho_downloads()
+
+    # --- Caminhos rápidos ---
+    st.subheader("📌 Caminhos rápidos:")
+
+    colc1, colc2, colc3, colc4, colc5 = st.columns(5)
+
+    with colc1:
+        if st.button("Downloads"):
+            st.session_state["input_pasta_manual"] = caminho_downloads()
+            st.rerun()
+
+    with colc2:
+        if st.button("Desktop"):
+            st.session_state["input_pasta_manual"] = caminho_desktop()
+            st.rerun()
+
+    with colc3:
+        if st.button("Documentos"):
+            st.session_state["input_pasta_manual"] = caminho_documentos()
+            st.rerun()
+
+    with colc4:
+        if st.button("Disco C:/"):
+            st.session_state["input_pasta_manual"] = "C:/"
+            st.rerun()
+
+    with colc5:
+        if st.button("Pasta atual"):
+            st.session_state["input_pasta_manual"] = os.getcwd()
+            st.rerun()
+
+    # --- Campo onde o usuário cola o caminho manual ---
     caminho_input = st.text_input(
-        "Caminho da pasta:",
-        value=st.session_state["pasta_visual"],
-        key="input_pasta_visual",
-        help="No Windows: abra a pasta, clique na barra de endereço e copie o caminho."
+        "📁 Cole ou edite o caminho da pasta desejada:",
+        value=st.session_state.get("input_pasta_manual", st.session_state["pasta_destino_padrao"]),
+        key="input_pasta_manual",
     )
 
-    # Sanitização
-    caminho = caminho_input.replace('"', "").replace("'", "").strip()
+    # Limpa aspas e espaços extras
+    caminho_limpo = caminho_input.replace('"', "").replace("'", "").strip()
 
-    pasta_ok = os.path.isdir(caminho)
+    # --- Botão para copiar caminho atual ---
+    if st.button("📋 Copiar caminho acima"):
+        st.toast("Caminho copiado para a área de transferência!")
+        st.write(f"`{caminho_limpo}`")  # apenas visual
 
-    if pasta_ok:
-        st.markdown(f"<span style='color:green'>✅ Pasta válida</span>", unsafe_allow_html=True)
-        st.session_state["pasta_visual"] = caminho
-    else:
-        st.markdown(f"<span style='color:red'>❌ Pasta inválida</span>", unsafe_allow_html=True)
+    # --- Validação do caminho ---
+    caminho_valido = False
+    try:
+        path_obj = Path(caminho_limpo)
 
-    # BOTÃO SALVAR
-    if st.button("🚀 Salvar Arquivos Agora", disabled=not pasta_ok, use_container_width=True):
+        if path_obj.exists() and path_obj.is_dir():
+            st.markdown("<span style='color:green'>✅ Pasta válida!</span>", unsafe_allow_html=True)
+            caminho_valido = True
+
+        elif not path_obj.exists():
+            st.markdown("<span style='color:orange'>⚠️ Pasta não existe. Será criada automaticamente.</span>", unsafe_allow_html=True)
+            caminho_valido = True
+
+        else:
+            st.error("❌ O caminho informado é um arquivo, não uma pasta.")
+
+    except:
+        st.error("❌ Caminho inválido. Verifique e tente novamente.")
+
+    st.markdown("---")
+
+    # --- Botão final para salvar arquivos ---
+    if st.button("🚀 Salvar Arquivos na Pasta", use_container_width=True, disabled=not caminho_valido):
 
         if not st.session_state.get("resultados"):
             st.warning("Processe os arquivos primeiro!")
-            st.stop()
-
-        dest = Path(st.session_state["pasta_visual"])
-        count = 0
-        erros = []
-
-        # Copia os PDFs já renomeados
-        for item in st.session_state["resultados"]:
-            novo_nome = item["novo_nome"]
-            src = Path(st.session_state["session_folder"]) / novo_nome
-            dst = dest / novo_nome
-
-            if src.exists():
-                try:
-                    shutil.copy2(src, dst)
-                    count += 1
-                except Exception as e:
-                    erros.append(f"{novo_nome} → {e}")
-            else:
-                erros.append(f"{novo_nome} → Arquivo não encontrado")
-
-        if count > 0:
-            st.balloons()
-            st.success(f"✅ {count} arquivos salvos em:\n`{dest}`")
-
+        else:
             try:
-                os.startfile(dest)
-            except:
-                pass
+                dest_path = Path(caminho_limpo)
+                dest_path.mkdir(parents=True, exist_ok=True)
 
-        if erros:
-            st.error("Alguns arquivos falharam:")
-            st.write(erros)
+                count = 0
+                erros_log = []
+
+                for r in st.session_state.get("resultados", []):
+                    fname = r["file"]
+                    src = session_folder / fname
+
+                    if src.exists():
+                        nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
+
+                        if not nome_final.lower().endswith(".pdf"):
+                            nome_final += ".pdf"
+
+                        dst = dest_path / nome_final
+
+                        try:
+                            shutil.copy2(src, dst)
+                            count += 1
+                        except Exception as e_copy:
+                            erros_log.append(f"{fname}: {str(e_copy)}")
+
+                if count > 0:
+                    st.balloons()
+                    st.success(f"✨ {count} arquivos salvos em:\n`{caminho_limpo}`")
+                    st.session_state["pasta_destino_padrao"] = caminho_limpo
+
+                    try:
+                        os.startfile(caminho_limpo)
+                    except:
+                        pass
+
+                if erros_log:
+                    st.error("⚠️ Alguns arquivos não puderam ser copiados:")
+                    st.write(erros_log)
+
+            except Exception as e:
+                st.error(f"❌ Erro ao salvar arquivos: {e}")
+
