@@ -1042,164 +1042,35 @@ if "resultados" in st.session_state:
 
     st.session_state["novos_nomes"] = novos_nomes
 
-    st.markdown("---")
-    st.markdown("### 📤 Opções de Saída")
+   st.markdown("---")
+    st.markdown("### 📤 Baixar Arquivos")
     
-    col_opt1, col_opt2 = st.columns(2)
+    # Prepara o buffer do zip na memória
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w") as zf:
+        for r in st.session_state.get("resultados", []):
+            fname = r["file"]
+            src = session_folder / fname
+            if src.exists():
+                # Pega o nome renomeado pelo usuário, se houver
+                nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
+                
+                # Garante que tenha extensão .pdf
+                if not nome_final.lower().endswith(".pdf"):
+                    nome_final += ".pdf"
+                
+                zf.write(src, arcname=nome_final)
+    mem.seek(0)
     
-    # --- OPÇÃO 1: BAIXAR ZIP (Para quem prefere um arquivo só) ---
-    with col_opt1:
-        st.info("📦 **Opção A: Baixar ZIP**")
-        st.caption("Ideal para enviar por e-mail ou guardar backup.")
-        if st.button("⬇️ Baixar Arquivo ZIP", use_container_width=True):
-            mem = io.BytesIO()
-            with zipfile.ZipFile(mem, "w") as zf:
-                for r in st.session_state.get("resultados", []):
-                    fname = r["file"]
-                    src = session_folder / fname
-                    if src.exists():
-                        # Usa o nome renomeado se houver
-                        nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
-                        zf.write(src, arcname=nome_final)
-            mem.seek(0)
-            st.download_button(
-                label="Clique para Salvar ZIP", 
-                data=mem, 
-                file_name="todas_notas.zip", 
-                mime="application/zip", 
-                key="btn_zip_final",
-                use_container_width=True
-            )
-# --- OPÇÃO B: SALVAR EM PASTA ESPECÍFICA (SEM ZIP) ---
-    with col_opt2:
-        st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
-        st.caption("Cole ou selecione um caminho válido do Windows.")
-
-    # --- Função auxiliar para montar caminhos mais usados ---
-    def caminho_downloads():
-        return os.path.join(os.path.expanduser("~"), "Downloads")
-
-    def caminho_desktop():
-        return os.path.join(os.path.expanduser("~"), "Desktop")
-
-    def caminho_documentos():
-        return os.path.join(os.path.expanduser("~"), "Documents")
-
-    # --- Inicializa sessão ---
-    if "pasta_destino_padrao" not in st.session_state:
-        st.session_state["pasta_destino_padrao"] = caminho_downloads()
-
-    # --- Caminhos rápidos ---
-    st.subheader("📌 Caminhos rápidos:")
-
-    colc1, colc2, colc3, colc4, colc5 = st.columns(5)
-
-    with colc1:
-        if st.button("Downloads"):
-            st.session_state["input_pasta_manual"] = caminho_downloads()
-            st.rerun()
-
-    with colc2:
-        if st.button("Desktop"):
-            st.session_state["input_pasta_manual"] = caminho_desktop()
-            st.rerun()
-
-    with colc3:
-        if st.button("Documentos"):
-            st.session_state["input_pasta_manual"] = caminho_documentos()
-            st.rerun()
-
-    with colc4:
-        if st.button("Disco C:/"):
-            st.session_state["input_pasta_manual"] = "C:/"
-            st.rerun()
-
-    with colc5:
-        if st.button("Pasta atual"):
-            st.session_state["input_pasta_manual"] = os.getcwd()
-            st.rerun()
-
-    # --- Campo onde o usuário cola o caminho manual ---
-    caminho_input = st.text_input(
-        "📁 Cole ou edite o caminho da pasta desejada:",
-        value=st.session_state.get("input_pasta_manual", st.session_state["pasta_destino_padrao"]),
-        key="input_pasta_manual",
+    st.info("✅ Processamento finalizado! Clique abaixo para baixar tudo.")
+    
+    # Botão de Download Único
+    st.download_button(
+        label="⬇️ Baixar Todas as Notas (.zip)", 
+        data=mem, 
+        file_name="notas_processadas.zip", 
+        mime="application/zip", 
+        key="btn_zip_final",
+        use_container_width=True,
+        type="primary"
     )
-
-    # Limpa aspas e espaços extras
-    caminho_limpo = caminho_input.replace('"', "").replace("'", "").strip()
-
-    # --- Botão para copiar caminho atual ---
-    if st.button("📋 Copiar caminho acima"):
-        st.toast("Caminho copiado para a área de transferência!")
-        st.write(f"`{caminho_limpo}`")  # apenas visual
-
-    # --- Validação do caminho ---
-    caminho_valido = False
-    try:
-        path_obj = Path(caminho_limpo)
-
-        if path_obj.exists() and path_obj.is_dir():
-            st.markdown("<span style='color:green'>✅ Pasta válida!</span>", unsafe_allow_html=True)
-            caminho_valido = True
-
-        elif not path_obj.exists():
-            st.markdown("<span style='color:orange'>⚠️ Pasta não existe. Será criada automaticamente.</span>", unsafe_allow_html=True)
-            caminho_valido = True
-
-        else:
-            st.error("❌ O caminho informado é um arquivo, não uma pasta.")
-
-    except:
-        st.error("❌ Caminho inválido. Verifique e tente novamente.")
-
-    st.markdown("---")
-
-    # --- Botão final para salvar arquivos ---
-    if st.button("🚀 Salvar Arquivos na Pasta", use_container_width=True, disabled=not caminho_valido):
-
-        if not st.session_state.get("resultados"):
-            st.warning("Processe os arquivos primeiro!")
-        else:
-            try:
-                dest_path = Path(caminho_limpo)
-                dest_path.mkdir(parents=True, exist_ok=True)
-
-                count = 0
-                erros_log = []
-
-                for r in st.session_state.get("resultados", []):
-                    fname = r["file"]
-                    src = session_folder / fname
-
-                    if src.exists():
-                        nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
-
-                        if not nome_final.lower().endswith(".pdf"):
-                            nome_final += ".pdf"
-
-                        dst = dest_path / nome_final
-
-                        try:
-                            shutil.copy2(src, dst)
-                            count += 1
-                        except Exception as e_copy:
-                            erros_log.append(f"{fname}: {str(e_copy)}")
-
-                if count > 0:
-                    st.balloons()
-                    st.success(f"✨ {count} arquivos salvos em:\n`{caminho_limpo}`")
-                    st.session_state["pasta_destino_padrao"] = caminho_limpo
-
-                    try:
-                        os.startfile(caminho_limpo)
-                    except:
-                        pass
-
-                if erros_log:
-                    st.error("⚠️ Alguns arquivos não puderam ser copiados:")
-                    st.write(erros_log)
-
-            except Exception as e:
-                st.error(f"❌ Erro ao salvar arquivos: {e}")
-
