@@ -1072,93 +1072,106 @@ if "resultados" in st.session_state:
             )
 
 # --- OPÇÃO B: SELECIONAR PASTA VISUALMENTE ---
-    with col_opt2:
-        st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
-        st.caption("Escolha a pasta usando a janela do Windows.")
+with col_opt2:
+    st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
+    st.caption("Escolha a pasta usando a janela do Windows.")
 
-        # Importação necessária para abrir a janela (geralmente já vem no Python)
-        import tkinter as tk
-        from tkinter import filedialog
+    import tkinter as tk
+    from tkinter import filedialog
 
-        # Inicializa o estado se não existir
-        if "pasta_visual" not in st.session_state:
-            st.session_state["pasta_visual"] = os.getcwd()
+    # Caminho inicial (uma única vez)
+    if "pasta_visual" not in st.session_state:
+        st.session_state["pasta_visual"] = os.path.join(os.path.expanduser("~"), "Downloads")
 
-        # Botão para abrir o seletor
-        col_btn_sel, col_path_view = st.columns([0.3, 0.7])
-        
-        with col_btn_sel:
-            if st.button("📂 Abrir Seletor", help="Abre uma janela pop-up para escolher a pasta"):
+    # Linha do botão + caminho exibido
+    col_btn_sel, col_path_view = st.columns([0.3, 0.7])
+
+    # --- BOTÃO PARA ABRIR SELECTOR ---
+    with col_btn_sel:
+        if st.button("📂 Abrir Seletor"):
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes('-topmost', True)  # janela na frente
+
+                pasta = filedialog.askdirectory()
+
+                root.destroy()
+
+                if pasta:
+                    st.session_state["pasta_visual"] = pasta
+                    st.rerun()
+
+            except Exception as e:
+                st.error(f"Erro ao abrir seletor: {e}")
+
+    # --- CAMPO COM O CAMINHO ESCOLHIDO ---
+    with col_path_view:
+        caminho_final = st.text_input(
+            "Pasta escolhida:",
+            value=st.session_state["pasta_visual"],
+            key="campo_visual",
+            disabled=True
+        )
+
+    # --- VALIDAÇÃO ---
+    pasta_ok = os.path.isdir(caminho_final)
+
+    if pasta_ok:
+        st.markdown(f"<span style='color:green'>✅ Pasta válida</span>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<span style='color:red'>❌ Selecione uma pasta válida</span>", unsafe_allow_html=True)
+
+    # --- BOTÃO PARA SALVAR ARQUIVOS ---
+    if st.button("🚀 Salvar Arquivos Agora", use_container_width=True, disabled=not pasta_ok):
+
+        if "resultados" not in st.session_state or not st.session_state["resultados"]:
+            st.warning("Processe os arquivos primeiro!")
+            st.stop()
+
+        try:
+            dest = Path(caminho_final)
+            count = 0
+            erros = []
+
+            # Seus PDFs finais estão em st.session_state["resultados"]
+            # Cada item da lista possui:
+            #   arquivo_original
+            #   novo_nome
+            #   emitente
+            #   numero
+            #   cidade
+            #   pages
+            #
+            # Os arquivos renomeados estão salvos em session_folder / novo_nome
+
+            for item in st.session_state["resultados"]:
+                nome = item["novo_nome"]
+                src = Path(st.session_state["session_folder"]) / nome
+                dst = dest / nome
+
+                if src.exists():
+                    try:
+                        shutil.copy2(src, dst)
+                        count += 1
+                    except Exception as e:
+                        erros.append(f"{nome} → {e}")
+                else:
+                    erros.append(f"{nome} → Arquivo não encontrado")
+
+            # Sucesso geral
+            if count > 0:
+                st.balloons()
+                st.success(f"✅ {count} arquivos salvos em:\n`{caminho_final}`")
                 try:
-                    # Cria uma janela invisível do Tkinter
-                    root = tk.Tk()
-                    root.withdraw() 
-                    root.wm_attributes('-topmost', 1) # Tenta forçar a janela para frente
-                    
-                    # Abre o explorador
-                    pasta_selecionada = filedialog.askdirectory(master=root)
-                    root.destroy()
-                    
-                    if pasta_selecionada:
-                        st.session_state["pasta_visual"] = pasta_selecionada
-                        st.rerun() # Recarrega para atualizar o campo ao lado
-                except Exception as e:
-                    st.error(f"Erro ao abrir seletor: {e}")
+                    os.startfile(caminho_final)
+                except:
+                    pass
 
-        # Mostra o caminho selecionado
-        with col_path_view:
-            caminho_final = st.text_input(
-                "Pasta escolhida:", 
-                value=st.session_state["pasta_visual"],
-                key="display_path_visual",
-                disabled=True # Deixa travado para garantir que veio do seletor
-            )
+            # Erros
+            if erros:
+                st.error("Alguns arquivos não puderam ser copiados:")
+                st.write(erros)
 
-        # Validação Visual
-        pasta_ok = False
-        if os.path.exists(caminho_final) and os.path.isdir(caminho_final):
-            st.markdown(f"<span style='color:green'>✅ Caminho válido: {caminho_final}</span>", unsafe_allow_html=True)
-            pasta_ok = True
-        else:
-            st.markdown(f"<span style='color:red'>❌ Selecione uma pasta válida.</span>", unsafe_allow_html=True)
-
-        # Botão de Salvar
-        if st.button("🚀 Salvar Arquivos Agora", use_container_width=True, disabled=not pasta_ok):
-            if not st.session_state.get("resultados"):
-                st.warning("Processe os arquivos primeiro!")
-            else:
-                try:
-                    dest_path = Path(caminho_final)
-                    count = 0
-                    erros_log = []
-                    
-                    for r in st.session_state.get("resultados", []):
-                        fname = r["file"]
-                        src = session_folder / fname
-                        
-                        if src.exists():
-                            nome_final = st.session_state.get("novos_nomes", {}).get(fname, fname)
-                            if not nome_final.lower().endswith(".pdf"):
-                                nome_final += ".pdf"
-                                
-                            dst = dest_path / nome_final
-                            try:
-                                shutil.copy2(src, dst)
-                                count += 1
-                            except Exception as e_copy:
-                                erros_log.append(f"{fname}: {str(e_copy)}")
-                    
-                    if count > 0:
-                        st.balloons()
-                        st.success(f"✅ Sucesso! {count} arquivos salvos.")
-                        try:
-                            os.startfile(caminho_final)
-                        except:
-                            pass
-                    
-                    if erros_log:
-                        st.error("Alguns arquivos falharam.")
-                        st.write(erros_log)
-                        
-                except Exception as e:
-                    st.error(f"Erro crítico: {e}")
+        except Exception as e:
+            st.error(f"Erro ao salvar: {e}")
