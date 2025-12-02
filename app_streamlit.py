@@ -1072,8 +1072,8 @@ if "resultados" in st.session_state:
             )
 # --- OPÇÃO B: SALVAR EM PASTA ESPECÍFICA (SEM ZIP) ---
     with col_opt2:
-    st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
-    st.caption("Cole ou selecione um caminho válido do Windows.")
+        st.success("📂 **Opção B: Salvar na Pasta (Sem ZIP)**")
+        st.caption("Cole ou selecione um caminho válido do Windows.")
 
     # --- Função auxiliar para montar caminhos mais usados ---
     def caminho_downloads():
