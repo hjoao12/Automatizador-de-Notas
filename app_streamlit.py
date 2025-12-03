@@ -425,7 +425,7 @@ def processar_pagina_worker(job_data):
         }
 
 # =====================================================================
-# SIDEBAR CONFIGURAÇÕES (VERSÃO ESTILOSA)
+# SIDEBAR CONFIGURAÇÕES (CORRIGIDO)
 # =====================================================================
 with st.sidebar:
     st.markdown("### ⚙️ Painel de Controle")
@@ -459,26 +459,23 @@ with st.sidebar:
             columns=["origem", "destino"] # Nomes internos simples
         )
 
-        # 2. Planilha Estilosa
+        # 2. Planilha Estilosa (SEM O ERRO DE PLACEHOLDER)
         df_editado = st.data_editor(
             df_padroes,
             num_rows="dynamic",
             use_container_width=True,
             hide_index=True,
             key="editor_patterns",
-            # AQUI ESTÁ A MÁGICA DO ESTILO:
             column_config={
                 "origem": st.column_config.TextColumn(
-                    "📄 Texto no PDF", # Título bonito
+                    "📄 Texto no PDF",
                     help="O texto que aparece na nota fiscal (ex: RAZAO SOCIAL LTDA)",
-                    placeholder="Ex: ELETROPAULO...",
                     required=True,
                     width="medium"
                 ),
                 "destino": st.column_config.TextColumn(
-                    "🏷️ Novo Nome", # Título bonito
+                    "🏷️ Novo Nome",
                     help="Como o arquivo será salvo (ex: ENEL)",
-                    placeholder="Ex: ENEL",
                     required=True,
                     width="small"
                 )
