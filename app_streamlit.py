@@ -230,7 +230,6 @@ if "db_patterns" not in st.session_state:
     st.session_state["db_patterns"] = get_patterns_db()
 
 # Carrega os padrões para a memória ao iniciar o script
-SUBSTITUICOES_FIXAS = load_patterns()
 
 def _normalizar_texto(s: str) -> str:
     if not s:
@@ -452,7 +451,6 @@ with st.sidebar:
         current_dict = st.session_state.get("db_patterns", {})
         
         # Convertemos para DataFrame para o editor funcionar
-        # Criamos o DataFrame garantindo que as colunas existam
         df_padroes = pd.DataFrame(
             list(current_dict.items()), 
             columns=["Texto Original (Na Nota)", "Renomear Para"]
@@ -461,7 +459,7 @@ with st.sidebar:
         # 2. Mostra a Planilha Editável
         df_editado = st.data_editor(
             df_padroes,
-            num_rows="dynamic", # ISSO AQUI já permite adicionar (+) e remover linhas (del)
+            num_rows="dynamic", # Permite adicionar (+) e remover linhas (del)
             use_container_width=True,
             hide_index=True,
             key="editor_patterns"
@@ -476,7 +474,7 @@ with st.sidebar:
                     chave = str(row["Texto Original (Na Nota)"]).strip().upper()
                     valor = str(row["Renomear Para"]).strip().upper()
                     
-                    # Só salva se tiver conteúdo
+                    # Só salva se tiver conteúdo válido
                     if chave and valor and chave != "NONE" and chave != "NAN":
                         novo_dict[chave] = valor
                 except:
@@ -488,7 +486,6 @@ with st.sidebar:
                 st.toast("✅ Padrões atualizados na nuvem!", icon="☁️")
                 time.sleep(1)
                 st.rerun()
-
 # =====================================================================
 # DASHBOARD ANALÍTICO
 # =====================================================================
