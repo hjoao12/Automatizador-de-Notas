@@ -425,88 +425,91 @@ def processar_pagina_worker(job_data):
         }
 
 # =====================================================================
-# SIDEBAR CONFIGURAÇÕES (VERSÃO PREMIUM / VISUAL)
+# SIDEBAR CONFIGURAÇÕES (CORRIGIDO)
 # =====================================================================
 with st.sidebar:
-    # --- Cabeçalho com Status ---
     st.markdown("### ⚙️ Painel de Controle")
+    
+    # --- Status do Banco de Dados ---
     if supabase:
-        st.markdown("📡 Conexão: <span style='color:#28a745; font-weight:bold'>Online</span>", unsafe_allow_html=True)
+        st.markdown("Status: <span style='color:green'><b>● Conectado à Nuvem</b></span>", unsafe_allow_html=True)
     else:
-        st.error("🚫 Offline (Sem Supabase)")
-    
-    st.markdown("---")
+        st.error("🔴 Sem conexão com Supabase")
 
-    # --- Área de Regras ---
+    st.markdown("---")
+    
+    # --- Configurações Gerais ---
+    with st.expander("🛠️ Preferências", expanded=False):
+        use_cache = st.toggle("Ativar Memória Rápida (Cache)", value=True)
+        if st.button("🧹 Limpar Memória", use_container_width=True):
+            document_cache.clear()
+            st.toast("Memória limpa!", icon="🧹")
+            time.sleep(0.5)
+            st.rerun()
+
+    st.markdown("---")
     st.markdown("### 🏷️ Regras de Renomeação")
-    
-    # 1. Busca dados
-    current_dict = st.session_state.get("db_patterns", {})
-    
-    # 2. Mostra Métrica (Visual Impactante)
-    col_m1, col_m2 = st.columns(2)
-    col_m1.metric("Regras Ativas", len(current_dict))
-    
-    # Botão de limpar cache alinhado com a métrica para economizar espaço
-    if col_m2.button("🧹 Limpar Cache", help="Força o sistema a reler os PDFs"):
-        document_cache.clear()
-        st.toast("Memória limpa!", icon="✨")
-        time.sleep(0.5)
-        st.rerun()
+    st.caption("Defina como o robô deve renomear os arquivos encontrados.")
 
     if supabase:
-        st.info("💡 **Dica:** Clique nas células para editar. O texto original deve ser igual ao que aparece no PDF.", icon="📝")
-
-        # 3. Prepara DataFrame
+        # 1. Prepara dados
+        current_dict = st.session_state.get("db_patterns", {})
         df_padroes = pd.DataFrame(
             list(current_dict.items()), 
-            columns=["origem", "destino"]
+            columns=["origem", "destino"] # Nomes internos simples
         )
 
-        # 4. A PLANILHA TURBINADA
+        # 2. Planilha Estilosa (SEM O ERRO DE PLACEHOLDER)
         df_editado = st.data_editor(
             df_padroes,
             num_rows="dynamic",
             use_container_width=True,
-            height=450, # <--- AQUI: Deixa a tabela bem alta e visível
             hide_index=True,
             key="editor_patterns",
             column_config={
                 "origem": st.column_config.TextColumn(
-                    "📄 Texto no PDF (Original)",
-                    help="Copie e cole aqui exatamente como aparece na nota fiscal.",
-                    width="large", # <--- AQUI: Dá bastante espaço para o nome longo
-                    required=True
+                    "📄 Texto no PDF",
+                    help="O texto que aparece na nota fiscal (ex: RAZAO SOCIAL LTDA)",
+                    required=True,
+                    width="medium"
                 ),
                 "destino": st.column_config.TextColumn(
-                    "🏷️ Salvar Como",
-                    help="O nome curto que você quer no arquivo final.",
-                    width="medium",
-                    required=True
+                    "🏷️ Novo Nome",
+                    help="Como o arquivo será salvo (ex: ENEL)",
+                    required=True,
+                    width="small"
                 )
             }
         )
 
-        # 5. Botão de Salvar (Largo e Chamativo)
-        st.write("") # Espacinho
-        if st.button("💾 SALVAR ALTERAÇÕES NA NUVEM", type="primary", use_container_width=True):
-            novo_dict = {}
-            # Processamento robusto
-            for index, row in df_editado.iterrows():
-                try:
-                    chave = str(row["origem"]).strip().upper()
-                    valor = str(row["destino"]).strip().upper()
-                    if chave and valor and chave not in ["NONE", "NAN", ""]:
-                        novo_dict[chave] = valor
-                except: continue
-            
-            # Sincronização
-            with st.spinner("⏳ Atualizando banco de dados..."):
-                if sync_patterns_db(novo_dict):
-                    st.session_state["db_patterns"] = novo_dict
-                    st.success("✅ Tudo salvo e seguro na nuvem!")
-                    time.sleep(1.5)
-                    st.rerun()
+        # 3. Botão de Salvar com destaque
+        col_save, col_info = st.columns([0.7, 0.3])
+        
+        with col_save:
+            if st.button("💾 Salvar Regras", type="primary", use_container_width=True):
+                # Reconstrói o dicionário
+                novo_dict = {}
+                for index, row in df_editado.iterrows():
+                    try:
+                        # Força maiúsculo e remove espaços extras
+                        chave = str(row["origem"]).strip().upper()
+                        valor = str(row["destino"]).strip().upper()
+                        
+                        if chave and valor and chave != "NONE" and chave != "NAN":
+                            novo_dict[chave] = valor
+                    except:
+                        continue
+                
+                # Envia para o Supabase
+                with st.spinner("Sincronizando com a nuvem..."):
+                    if sync_patterns_db(novo_dict):
+                        st.session_state["db_patterns"] = novo_dict
+                        st.toast("Regras salvas com sucesso!", icon="✅")
+                        time.sleep(1)
+                        st.rerun()
+        
+        with col_info:
+            st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; padding-top:10px'>{len(current_dict)} regras</div>", unsafe_allow_html=True)
 # =====================================================================
 # DASHBOARD ANALÍTICO
 # =====================================================================
