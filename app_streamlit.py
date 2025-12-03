@@ -425,67 +425,94 @@ def processar_pagina_worker(job_data):
         }
 
 # =====================================================================
-# SIDEBAR CONFIGURAÇÕES
+# SIDEBAR CONFIGURAÇÕES (VERSÃO ESTILOSA)
 # =====================================================================
 with st.sidebar:
-    st.markdown("### 🔧 Configurações")
+    st.markdown("### ⚙️ Painel de Controle")
     
-    # Configuração de cache
-    st.markdown("#### Otimizações")
-    use_cache = st.checkbox("Usar Cache", value=True, key="use_cache")
-    
-    if st.button("🔄 Limpar Cache"):
-        document_cache.clear()
-        st.success("Cache limpo!")
-        st.rerun()
+    # --- Status do Banco de Dados ---
+    if supabase:
+        st.markdown("Status: <span style='color:green'><b>● Conectado à Nuvem</b></span>", unsafe_allow_html=True)
+    else:
+        st.error("🔴 Sem conexão com Supabase")
 
     st.markdown("---")
-    st.markdown("### ☁️ Padrões (Nuvem)")
     
-    if not supabase:
-        st.warning("⚠️ Supabase não configurado.")
-    else:
-        st.caption("Edite a planilha abaixo. As alterações vão para o banco de dados.")
-        
-        # 1. Prepara dados para a tabela
+    # --- Configurações Gerais ---
+    with st.expander("🛠️ Preferências", expanded=False):
+        use_cache = st.toggle("Ativar Memória Rápida (Cache)", value=True)
+        if st.button("🧹 Limpar Memória", use_container_width=True):
+            document_cache.clear()
+            st.toast("Memória limpa!", icon="🧹")
+            time.sleep(0.5)
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🏷️ Regras de Renomeação")
+    st.caption("Defina como o robô deve renomear os arquivos encontrados.")
+
+    if supabase:
+        # 1. Prepara dados
         current_dict = st.session_state.get("db_patterns", {})
-        
-        # Convertemos para DataFrame para o editor funcionar
         df_padroes = pd.DataFrame(
             list(current_dict.items()), 
-            columns=["Texto Original (Na Nota)", "Renomear Para"]
+            columns=["origem", "destino"] # Nomes internos simples
         )
 
-        # 2. Mostra a Planilha Editável
+        # 2. Planilha Estilosa
         df_editado = st.data_editor(
             df_padroes,
-            num_rows="dynamic", # Permite adicionar (+) e remover linhas (del)
+            num_rows="dynamic",
             use_container_width=True,
             hide_index=True,
-            key="editor_patterns"
+            key="editor_patterns",
+            # AQUI ESTÁ A MÁGICA DO ESTILO:
+            column_config={
+                "origem": st.column_config.TextColumn(
+                    "📄 Texto no PDF", # Título bonito
+                    help="O texto que aparece na nota fiscal (ex: RAZAO SOCIAL LTDA)",
+                    placeholder="Ex: ELETROPAULO...",
+                    required=True,
+                    width="medium"
+                ),
+                "destino": st.column_config.TextColumn(
+                    "🏷️ Novo Nome", # Título bonito
+                    help="Como o arquivo será salvo (ex: ENEL)",
+                    placeholder="Ex: ENEL",
+                    required=True,
+                    width="small"
+                )
+            }
         )
 
-        # 3. Botão de Salvar
-        if st.button("💾 Salvar Alterações"):
-            # Reconstrói o dicionário a partir da planilha
-            novo_dict = {}
-            for index, row in df_editado.iterrows():
-                try:
-                    chave = str(row["Texto Original (Na Nota)"]).strip().upper()
-                    valor = str(row["Renomear Para"]).strip().upper()
-                    
-                    # Só salva se tiver conteúdo válido
-                    if chave and valor and chave != "NONE" and chave != "NAN":
-                        novo_dict[chave] = valor
-                except:
-                    continue
-            
-            # Envia para o Supabase
-            if sync_patterns_db(novo_dict):
-                st.session_state["db_patterns"] = novo_dict # Atualiza memória local
-                st.toast("✅ Padrões atualizados na nuvem!", icon="☁️")
-                time.sleep(1)
-                st.rerun()
+        # 3. Botão de Salvar com destaque
+        col_save, col_info = st.columns([0.7, 0.3])
+        
+        with col_save:
+            if st.button("💾 Salvar Regras", type="primary", use_container_width=True):
+                # Reconstrói o dicionário
+                novo_dict = {}
+                for index, row in df_editado.iterrows():
+                    try:
+                        # Força maiúsculo e remove espaços extras
+                        chave = str(row["origem"]).strip().upper()
+                        valor = str(row["destino"]).strip().upper()
+                        
+                        if chave and valor and chave != "NONE" and chave != "NAN":
+                            novo_dict[chave] = valor
+                    except:
+                        continue
+                
+                # Envia para o Supabase
+                with st.spinner("Sincronizando com a nuvem..."):
+                    if sync_patterns_db(novo_dict):
+                        st.session_state["db_patterns"] = novo_dict
+                        st.toast("Regras salvas com sucesso!", icon="✅")
+                        time.sleep(1)
+                        st.rerun()
+        
+        with col_info:
+            st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; padding-top:10px'>{len(current_dict)} regras</div>", unsafe_allow_html=True)
 # =====================================================================
 # DASHBOARD ANALÍTICO
 # =====================================================================
