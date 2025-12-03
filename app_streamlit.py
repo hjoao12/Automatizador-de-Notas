@@ -10,6 +10,8 @@ import re
 import hashlib
 import pickle
 import base64
+import pandas as pd 
+from supabase import create_client, Client
 from streamlit_pdf_viewer import pdf_viewer
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
@@ -173,52 +175,59 @@ MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 # NORMALIZAÇÃO E SUBSTITUIÇÕES
 # =====================================================================
 # =====================================================================
-# GESTÃO DE PADRÕES (NOVA LÓGICA DINÂMICA)
+# GESTÃO DE PADRÕES (VIA SUPABASE)
 # =====================================================================
-PATTERNS_FILE = "patterns.json"
-
-def load_patterns():
-    """Carrega padrões do arquivo JSON ou cria padrões padrão se não existir"""
-    # Seus padrões originais ficam aqui como backup/inicialização
-    default_patterns = {
-        "COMPANHIA DE AGUA E ESGOTOS DA PARAIBA": "CAGEPA",
-        "COMPANHIA DE AGUA E ESGOTOS DA PARAÍBA": "CAGEPA",
-        "CIA DE AGUA E ESGOTO DO CEARA": "CAGECE",
-        "COMPANHIA DE AGUAS E ESGOTOS DO RN": "CAERN",
-        "PETRÓLEO BRASILEIRO S.A": "PETROBRAS",
-        "PETROLEO BRASILEIRO S.A": "PETROBRAS",
-        "NEOENERGIA": "NEOENERGIA",
-        "EQUATORIAL": "EQUATORIAL",
-        "INNOVATIVE WATER CARE": "SIGURA", 
-        "COMERCIAL E IMPORTADORA DE PNEUS": "CAMPNEUS",
-        "URP CARGAS E LOGISTICA":"URP",
-        "M.F DE MELO FILHO": "MF_DE_MELO",
-        "EXPRESS TCM": "EXPRESS_TCM",
-        "MDM RENOVADORA DE PNEUS": "MDM_RENOVADORA",
-        "EKIPE TEC DE SEG E INCENDIO": "EKIPE",
-        # ... adicione outros essenciais aqui se quiser garantir que sempre existam no reset
-    }
-
-    # Se o arquivo não existe, cria ele com os defaults
-    if not os.path.exists(PATTERNS_FILE):
-        save_patterns(default_patterns)
-        return default_patterns
-    
+@st.cache_resource
+def init_supabase():
+    """Conecta ao Supabase usando secrets do Streamlit"""
     try:
-        with open(PATTERNS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        # Tenta pegar dos secrets
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+        return create_client(url, key)
     except Exception:
-        return default_patterns
+        return None
 
-def save_patterns(patterns):
-    """Salva os padrões no arquivo JSON"""
+supabase = init_supabase()
+
+def get_patterns_db():
+    """Baixa os padrões do banco de dados"""
+    if not supabase: return {}
     try:
-        with open(PATTERNS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(patterns, f, ensure_ascii=False, indent=4)
+        response = supabase.table("invoice_patterns").select("*").execute()
+        # Converte a lista do banco em um dicionário {origem: destino}
+        return {item["origin"]: item["target"] for item in response.data}
+    except Exception as e:
+        st.error(f"Erro ao ler banco: {e}")
+        return {}
+
+def sync_patterns_db(new_dict):
+    """Sincroniza a planilha da tela com o banco de dados"""
+    if not supabase: return False
+    try:
+        # 1. Pega o que tem no banco hoje para comparar
+        current_data = supabase.table("invoice_patterns").select("origin").execute()
+        db_keys = {row['origin'] for row in current_data.data}
+        new_keys = set(new_dict.keys())
+
+        # 2. Deleta o que você removeu da planilha
+        to_delete = list(db_keys - new_keys)
+        if to_delete:
+            supabase.table("invoice_patterns").delete().in_("origin", to_delete).execute()
+
+        # 3. Atualiza/Insere o que está na planilha
+        upsert_data = [{"origin": k, "target": v} for k, v in new_dict.items()]
+        if upsert_data:
+            supabase.table("invoice_patterns").upsert(upsert_data, on_conflict="origin").execute()
+            
         return True
     except Exception as e:
-        st.error(f"Erro ao salvar padrões: {e}")
+        st.error(f"Erro ao salvar: {e}")
         return False
+
+# Carrega os padrões na memória ao iniciar (Session State)
+if "db_patterns" not in st.session_state:
+    st.session_state["db_patterns"] = get_patterns_db()
 
 # Carrega os padrões para a memória ao iniciar o script
 SUBSTITUICOES_FIXAS = load_patterns()
@@ -233,11 +242,18 @@ def _normalizar_texto(s: str) -> str:
 def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
+    
+    # 1. Regra Fixa (Ex: Sabará)
     if "SABARA" in nome_norm:
         return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
-    for padrao, substituto in SUBSTITUICOES_FIXAS.items():
+        
+    # 2. Regra Dinâmica (Vinda do Supabase/Memória)
+    patterns = st.session_state.get("db_patterns", {})
+    
+    for padrao, substituto in patterns.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
+            
     return re.sub(r"\s+", "_", nome_norm)
 
 def limpar_emitente(nome: str) -> str:
@@ -423,44 +439,54 @@ with st.sidebar:
         document_cache.clear()
         st.success("Cache limpo!")
         st.rerun()
-    st.markdown("---")
-    st.markdown("### 📝 Gerenciar Padrões")
-    
-    with st.expander("Adicionar / Remover"):
-        st.markdown("O sistema aprende com esses padrões.")
-        
-        # --- ADICIONAR ---
-        with st.form("add_pattern_form"):
-            st.write("**Novo Padrão:**")
-            new_key = st.text_input("Texto na Nota (Original)", placeholder="Ex: CIA DE ELETRICIDADE")
-            new_value = st.text_input("Renomear para", placeholder="Ex: NEOENERGIA")
-            
-            if st.form_submit_button("💾 Salvar Novo"):
-                if new_key and new_value:
-                    SUBSTITUICOES_FIXAS[new_key.upper()] = new_value.upper()
-                    if save_patterns(SUBSTITUICOES_FIXAS):
-                        st.success("Salvo!")
-                        time.sleep(0.5)
-                        st.rerun()
-                else:
-                    st.warning("Preencha os dois campos.")
 
-        st.markdown("---")
+    st.markdown("---")
+    st.markdown("### ☁️ Padrões (Nuvem)")
+    
+    if not supabase:
+        st.warning("⚠️ Supabase não configurado.")
+    else:
+        st.caption("Edite a planilha abaixo. As alterações vão para o banco de dados.")
         
-        # --- REMOVER ---
-        st.write("**Padrões Ativos:**")
-        # Lista ordenada para facilitar
-        lista_padroes = sorted(SUBSTITUICOES_FIXAS.keys())
+        # 1. Prepara dados para a tabela
+        current_dict = st.session_state.get("db_patterns", {})
         
-        sel_del = st.selectbox("Selecione para ver/excluir", [""] + lista_padroes)
-        
-        if sel_del:
-            st.info(f"Substitui por: **{SUBSTITUICOES_FIXAS[sel_del]}**")
-            if st.button("🗑️ Excluir este padrão"):
-                del SUBSTITUICOES_FIXAS[sel_del]
-                save_patterns(SUBSTITUICOES_FIXAS)
-                st.success("Removido!")
-                time.sleep(0.5)
+        # Convertemos para DataFrame para o editor funcionar
+        # Criamos o DataFrame garantindo que as colunas existam
+        df_padroes = pd.DataFrame(
+            list(current_dict.items()), 
+            columns=["Texto Original (Na Nota)", "Renomear Para"]
+        )
+
+        # 2. Mostra a Planilha Editável
+        df_editado = st.data_editor(
+            df_padroes,
+            num_rows="dynamic", # ISSO AQUI já permite adicionar (+) e remover linhas (del)
+            use_container_width=True,
+            hide_index=True,
+            key="editor_patterns"
+        )
+
+        # 3. Botão de Salvar
+        if st.button("💾 Salvar Alterações"):
+            # Reconstrói o dicionário a partir da planilha
+            novo_dict = {}
+            for index, row in df_editado.iterrows():
+                try:
+                    chave = str(row["Texto Original (Na Nota)"]).strip().upper()
+                    valor = str(row["Renomear Para"]).strip().upper()
+                    
+                    # Só salva se tiver conteúdo
+                    if chave and valor and chave != "NONE" and chave != "NAN":
+                        novo_dict[chave] = valor
+                except:
+                    continue
+            
+            # Envia para o Supabase
+            if sync_patterns_db(novo_dict):
+                st.session_state["db_patterns"] = novo_dict # Atualiza memória local
+                st.toast("✅ Padrões atualizados na nuvem!", icon="☁️")
+                time.sleep(1)
                 st.rerun()
 
 # =====================================================================

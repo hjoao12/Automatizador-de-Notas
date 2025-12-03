@@ -8,3 +8,5 @@ pymupdf
 streamlit-sortables
 pypdf
 streamlit-pdf-viewer
+supabase
+pandas
