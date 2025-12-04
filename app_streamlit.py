@@ -1,3 +1,4 @@
+
 import os 
 import io
 import time
@@ -242,21 +243,17 @@ def substituir_nome_emitente(nome_raw: str, cidade_raw: str = None) -> str:
     nome_norm = _normalizar_texto(nome_raw)
     cidade_norm = _normalizar_texto(cidade_raw) if cidade_raw else None
     
-    # 1. PRIORIDADE MÁXIMA: Regras da Planilha/Banco de Dados
-    # Se na sua planilha tiver "CAGEPA", ele vai respeitar isso antes de qualquer coisa.
+    # 1. Regra Fixa (Ex: Sabará)
+    if "SABARA" in nome_norm:
+        return f"SB_{cidade_norm.split()[0]}" if cidade_norm else "SB"
+        
+    # 2. Regra Dinâmica (Vinda do Supabase/Memória)
     patterns = st.session_state.get("db_patterns", {})
+    
     for padrao, substituto in patterns.items():
         if _normalizar_texto(padrao) in nome_norm:
             return substituto
-
-    # 2. Regra Específica: Sabará
-    # Só entra aqui se NÃO encontrou nada na planilha acima.
-    if "SABARA" in nome_norm:
-        # Pega a primeira palavra da cidade (Ex: SAO PAULO -> SB_SAO)
-        suffix = cidade_norm.split()[0] if cidade_norm else "GERAL"
-        return f"SB_{suffix}"
             
-    # 3. Se não achou nada, devolve o nome limpo com underlines
     return re.sub(r"\s+", "_", nome_norm)
 
 def limpar_emitente(nome: str) -> str:
@@ -624,10 +621,6 @@ if uploaded_files and process_btn:
         "REGRAS CRÍTICAS: "
         "1. Se não encontrar o número da nota explicitamente, retorne null. "
         "2. Se não encontrar o emitente, retorne null. "
-        "REGRAS DE OURO (LEIA COM ATENÇÃO):"
-        "1. O 'Emitente' NÃO É O CLIENTE. Se o cliente for 'Sabará' ou similar, IGNORE. Busque a outra empresa."
-        "2. Se for conta de consumo (Água, Luz), o emitente é a concessionária (Ex: ENEL, NEONERGIA) e NÃO o consumidor."
-        "3. Ignore endereços. Procure pela Razão Social ou Nome Fantasia no cabeçalho."
         "Responda EXCLUSIVAMENTE o JSON bruto (sem markdown ```json): "
         "{\"emitente\": \"string ou null\", \"numero_nota\": \"string ou null\", \"cidade\": \"string ou null\"}"
     )
