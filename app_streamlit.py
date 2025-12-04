@@ -335,7 +335,7 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
             resp = model.generate_content(
                 [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
                 generation_config={"response_mime_type": "application/json"},
-                request_options={'timeout': 30}
+                request_options={'timeout': 60}
             )
             tempo = round(time.time() - start, 2)
             
@@ -624,8 +624,12 @@ if uploaded_files and process_btn:
         "REGRAS CRÍTICAS: "
         "1. Se não encontrar o número da nota explicitamente, retorne null. "
         "2. Se não encontrar o emitente, retorne null. "
-        "Responda EXCLUSIVAMENTE o JSON bruto."
-        "Não confundir o nome (razão social/nome fantasia) do emitente com o campo de destinatário ou remetente"
+        "REGRAS DE OURO (LEIA COM ATENÇÃO):"
+        "1. O 'Emitente' NÃO É O CLIENTE. Se o cliente for 'Sabará' ou similar, IGNORE. Busque a outra empresa."
+        "2. Se for conta de consumo (Água, Luz), o emitente é a concessionária (Ex: ENEL, NEONERGIA) e NÃO o consumidor."
+        "3. Ignore endereços. Procure pela Razão Social ou Nome Fantasia no cabeçalho."
+        "Responda EXCLUSIVAMENTE o JSON bruto (sem markdown ```json): "
+        "{\"emitente\": \"string ou null\", \"numero_nota\": \"string ou null\", \"cidade\": \"string ou null\"}"
     )
 
     # 1. Preparar trabalhos
@@ -653,7 +657,7 @@ if uploaded_files and process_btn:
             processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "System"))
 
     # 2. Executar em Paralelo
-    MAX_WORKERS = 8
+    MAX_WORKERS = 4
     total_jobs = len(jobs) if jobs else 1
     
     st.info(f"🚀 Iniciando processamento de {len(jobs)} páginas...")
