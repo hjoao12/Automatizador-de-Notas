@@ -619,17 +619,11 @@ if uploaded_files and process_btn:
     start_all = time.time()
 
     prompt = (
-        "Você é um extrator de dados OCR. Analise esta página. "
-        "Extraia: 'emitente' (Nome fantasia principal), 'numero_nota' (Apenas dígitos) e 'cidade'. "
-        "REGRAS CRÍTICAS: "
-        "1. Se não encontrar o número da nota explicitamente, retorne null. "
-        "2. Se não encontrar o emitente, retorne null. "
-        "REGRAS DE OURO (LEIA COM ATENÇÃO):"
-        "1. O 'Emitente' NÃO É O CLIENTE. Se o cliente for 'Sabará' ou similar, IGNORE. Busque a outra empresa."
-        "2. Se for conta de consumo (Água, Luz), o emitente é a concessionária (Ex: ENEL, NEONERGIA) e NÃO o consumidor."
-        "3. Ignore endereços. Procure pela Razão Social ou Nome Fantasia no cabeçalho."
-        "Responda EXCLUSIVAMENTE o JSON bruto (sem markdown ```json): "
-        "{\"emitente\": \"string ou null\", \"numero_nota\": \"string ou null\", \"cidade\": \"string ou null\"}"
+        Extraia JSON: {'emitente': string, 'numero_nota': string, 'cidade': string}. "
+        "Regras: 1. Emitente é o PRESTADOR (Topo/Logotipo). Ignore 'Sabará' se for cliente. "
+        "2. Se conta consumo, emitente é a concessionária. "
+        "3. Não achou número? null. "
+        "Retorne APENAS JSON."
     )
 
     # 1. Preparar trabalhos
@@ -657,7 +651,7 @@ if uploaded_files and process_btn:
             processed_logs.append((name, 0, "ERRO_LEITURA", str(e), "System"))
 
     # 2. Executar em Paralelo
-    MAX_WORKERS = 4
+    MAX_WORKERS = 8
     total_jobs = len(jobs) if jobs else 1
     
     st.info(f"🚀 Iniciando processamento de {len(jobs)} páginas...")
