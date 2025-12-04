@@ -619,7 +619,7 @@ if uploaded_files and process_btn:
     start_all = time.time()
 
     prompt = (
-        Extraia JSON: {'emitente': string, 'numero_nota': string, 'cidade': string}. "
+        "Extraia JSON: {'emitente': string, 'numero_nota': string, 'cidade': string}."
         "Regras: 1. Emitente é o PRESTADOR (Topo/Logotipo). Ignore 'Sabará' se for cliente. "
         "2. Se conta consumo, emitente é a concessionária. "
         "3. Não achou número? null. "
