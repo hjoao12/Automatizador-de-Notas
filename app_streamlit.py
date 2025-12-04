@@ -335,7 +335,7 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
             resp = model.generate_content(
                 [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
                 generation_config={"response_mime_type": "application/json"},
-                request_options={'timeout': 60}
+                request_options={'timeout': 30}
             )
             tempo = round(time.time() - start, 2)
             
@@ -619,11 +619,13 @@ if uploaded_files and process_btn:
     start_all = time.time()
 
     prompt = (
-        "Extraia JSON: {'emitente': string, 'numero_nota': string, 'cidade': string}."
-        "Regras: 1. Emitente é o PRESTADOR (Topo/Logotipo). Ignore 'Sabará' se for cliente. "
-        "2. Se conta consumo, emitente é a concessionária. "
-        "3. Não achou número? null. "
-        "Retorne APENAS JSON."
+        "Você é um extrator de dados OCR. Analise esta página. "
+        "Extraia: 'emitente' (Nome fantasia principal), 'numero_nota' (Apenas dígitos) e 'cidade'. "
+        "REGRAS CRÍTICAS: "
+        "1. Se não encontrar o número da nota explicitamente, retorne null. "
+        "2. Se não encontrar o emitente, retorne null. "
+        "Responda EXCLUSIVAMENTE o JSON bruto."
+        "Não confundir o nome (razão social/nome fantasia) do emitente com o campo de destinatário ou remetente"
     )
 
     # 1. Preparar trabalhos
