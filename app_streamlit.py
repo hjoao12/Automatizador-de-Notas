@@ -279,40 +279,53 @@ def limpar_para_nome_arquivo(texto):
     return texto.strip()[:60] # Limita a 60 caracteres para não dar erro de path longo
 
 def validar_e_corrigir_dados(dados):
-    """Valida e corrige dados extraídos da IA"""
+    """Valida e corrige dados extraídos da IA com heurísticas de recuperação"""
     if not isinstance(dados, dict):
-        dados = {}
+        # Tenta recuperar se for uma lista de 1 item (erro comum de LLM)
+        if isinstance(dados, list) and len(dados) > 0 and isinstance(dados[0], dict):
+            dados = dados[0]
+        else:
+            return {"emitente": "ERRO_FORMATO", "numero_nota": "000", "cidade": ""}
     
-    required_fields = ['emitente', 'numero_nota', 'cidade']
-    
-    # Verifica campos obrigatórios
-    for field in required_fields:
-        if field not in dados or not dados[field]:
-            dados[field] = "NÃO_IDENTIFICADO"
-    
-    # Correções comuns
-    correcoes = {
-        'emitente': {
-            'CPFL ENERGIA': 'CPFL',
-            'COMPANHIA PAULISTA DE FORCA E LUZ': 'CPFL',
-            'SABARA': 'SABARA'
-        }
-    }
-    
-    for field, correcoes_field in correcoes.items():
-        if field in dados:
-            for incorreto, correto in correcoes_field.items():
-                if incorreto in dados[field].upper():
-                    dados[field] = correto
-                    break
-    
-    # Validação de número da nota
-    if 'numero_nota' in dados:
-        numero_limpo = re.sub(r'[^\d]', '', str(dados['numero_nota']))
-        dados['numero_nota'] = numero_limpo if numero_limpo else "000000"
-    
-    return dados
+    # Normalização de chaves (caso a IA use maiúsculas ou acentos)
+    dados_norm = {}
+    for k, v in dados.items():
+        k_lower = k.lower().strip()
+        if "numero" in k_lower or "nota" in k_lower: key = "numero_nota"
+        elif "emitente" in k_lower or "prestador" in k_lower: key = "emitente"
+        elif "cidade" in k_lower: key = "cidade"
+        else: key = k
+        dados_norm[key] = v
+    dados = dados_norm
 
+    # 1. Recuperação de Emitente
+    emitente = str(dados.get('emitente', ''))
+    # Correções forçadas de erros comuns de OCR
+    if 'CPFL' in emitente.upper() or 'PAULISTA DE FORCA' in emitente.upper():
+        emitente = 'CPFL'
+    elif not emitente or emitente.upper() in ["NULL", "NONE", "NÃO IDENTIFICADO", "DESCONHECIDO"]:
+        # Se não achou emitente, mas tem cidade, as vezes ajuda
+        emitente = "EMITENTE_DESCONHECIDO"
+    dados['emitente'] = emitente
+
+    # 2. Recuperação de Número (A parte crítica)
+    raw_num = str(dados.get('numero_nota', ''))
+    # Remove tudo que não é digito
+    so_digitos = re.sub(r'[^\d]', '', raw_num)
+    
+    # Heurística: Se a IA mandou "Nº 1234", o regex pega 1234. 
+    # Se mandou "série 1 número 500", pega 1500. Vamos tentar confiar se tiver pelo menos 1 dígito.
+    if so_digitos:
+        dados['numero_nota'] = so_digitos
+    else:
+        # Se falhou total, marca como 000000 para cair na revisão, 
+        # MAS mantém o emitente se tiver sido achado.
+        dados['numero_nota'] = "000000" 
+        
+    if 'cidade' not in dados:
+        dados['cidade'] = ""
+        
+    return dados
 # =====================================================================
 # PROCESSAMENTO GEMINI (SIMPLIFICADO)
 # =====================================================================
@@ -615,14 +628,26 @@ if uploaded_files and process_btn:
     progresso_text = st.empty()
     start_all = time.time()
 
+    # =================================================================
+    # PROMPT OTIMIZADO PARA DOCUMENTOS BRASILEIROS
+    # =================================================================
     prompt = (
-        "Você é um extrator de dados OCR. Analise esta página. "
-        "Extraia: 'emitente' (Nome fantasia principal), 'numero_nota' (Apenas dígitos) e 'cidade'. "
-        "REGRAS CRÍTICAS: "
-        "1. Se não encontrar o número da nota explicitamente, retorne null. "
-        "2. Se não encontrar o emitente, retorne null. "
-        "Responda EXCLUSIVAMENTE o JSON bruto (sem markdown ```json): "
-        "{\"emitente\": \"string ou null\", \"numero_nota\": \"string ou null\", \"cidade\": \"string ou null\"}"
+        "Atue como um Auditor de Notas Fiscais Brasileiro. Analise a imagem do documento. "
+        "Sua missão é extrair dados mesmo em documentos com layout complexo ou baixa qualidade. "
+        
+        "1. EMITENTE (Prestador): Busque o nome da empresa que PRESTOU o serviço. "
+        "   - Dica: Procure blocos como 'Prestador de Serviços', 'Razão Social' ou o logo no cabeçalho. "
+        "   - Ignore: 'Prefeitura', 'Tomador', 'Receita Federal'. "
+        
+        "2. NÚMERO DA NOTA: Identifique o identificador único do documento. "
+        "   - Dica: Procure por rótulos 'Nº', 'Número', 'NFS-e', 'DANFE', 'Fatura'. "
+        "   - Geralmente está no topo direito ou em destaque negrito. "
+        
+        "3. CIDADE: A cidade do prestador do serviço. "
+        
+        "FORMATO DE RESPOSTA (JSON Puro): "
+        "Responda APENAS um objeto JSON com as chaves: 'emitente', 'numero_nota', 'cidade'. "
+        "Se um campo estiver muito ilegível, tente inferir pelo contexto. Use 'DESCONHECIDO' apenas em último caso."
     )
 
     # 1. Preparar trabalhos
