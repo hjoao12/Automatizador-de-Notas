@@ -10,7 +10,7 @@ import re
 import hashlib
 import pickle
 import base64
-import gc  # <--- MELHORIA: Garbage Collector
+import gc
 import pandas as pd
 from supabase import create_client, Client
 from streamlit_pdf_viewer import pdf_viewer
@@ -106,7 +106,6 @@ class DocumentCache:
         self.cache_dir.mkdir(exist_ok=True)
     
     def get_cache_key(self, pdf_bytes, prompt):
-        """Gera chave única baseada no conteúdo do PDF e prompt"""
         content_hash = hashlib.md5(pdf_bytes).hexdigest()
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
         return f"{content_hash}_{prompt_hash}"
@@ -117,8 +116,7 @@ class DocumentCache:
             try:
                 with open(cache_file, 'rb') as f:
                     return pickle.load(f)
-            except:
-                return None
+            except: return None
         return None
     
     def set(self, key, data):
@@ -126,16 +124,12 @@ class DocumentCache:
         try:
             with open(cache_file, 'wb') as f:
                 pickle.dump(data, f)
-        except:
-            pass
+        except: pass
     
     def clear(self):
-        """Limpa todo o cache"""
         for cache_file in self.cache_dir.glob("*.pkl"):
-            try:
-                cache_file.unlink()
-            except:
-                pass
+            try: cache_file.unlink()
+            except: pass
 
 document_cache = DocumentCache()
 
@@ -158,12 +152,6 @@ except Exception as e:
 # =====================================================================
 # CONFIGURAÇÕES GERAIS
 # =====================================================================
-PRIMARY = "#0f4c81"
-ACCENT = "#6fb3b8"
-BG = "#F7FAFC"
-CARD_BG = "#FFFFFF"
-TEXT_MUTED = "#6b7280"
-
 TEMP_FOLDER = Path("./temp")
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
@@ -177,19 +165,15 @@ MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
 # =====================================================================
 @st.cache_resource
 def init_supabase():
-    """Conecta ao Supabase usando secrets do Streamlit"""
     try:
-        # Tenta pegar dos secrets
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
         return create_client(url, key)
-    except Exception:
-        return None
+    except: return None
 
 supabase = init_supabase()
 
 def get_patterns_db():
-    """Baixa os padrões do banco de dados"""
     if not supabase: return {}
     try:
         response = supabase.table("invoice_patterns").select("*").execute()
@@ -199,7 +183,6 @@ def get_patterns_db():
         return {}
 
 def sync_patterns_db(new_dict):
-    """Sincroniza a planilha da tela com o banco de dados"""
     if not supabase: return False
     try:
         current_data = supabase.table("invoice_patterns").select("origin").execute()
@@ -213,7 +196,6 @@ def sync_patterns_db(new_dict):
         upsert_data = [{"origin": k, "target": v} for k, v in new_dict.items()]
         if upsert_data:
             supabase.table("invoice_patterns").upsert(upsert_data, on_conflict="origin").execute()
-            
         return True
     except Exception as e:
         st.error(f"Erro ao salvar: {e}")
@@ -259,42 +241,63 @@ def limpar_para_nome_arquivo(texto):
     texto = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII")
     return texto.strip()[:60]
 
-def validar_e_corrigir_dados(dados):
-    """Valida e corrige dados extraídos da IA com heurísticas de recuperação"""
+# --- LÓGICA HÍBRIDA: AI + REGEX NO TEXTO REAL ---
+def validar_e_corrigir_dados(dados, texto_pdf_real=""):
+    """
+    Se a IA falhar no número, usamos Regex no texto extraído diretamente do PDF.
+    Isso resolve o caso 'N° 000.013.966' que a IA ignora.
+    """
     if not isinstance(dados, dict):
         if isinstance(dados, list) and len(dados) > 0 and isinstance(dados[0], dict):
             dados = dados[0]
         else:
             return {"emitente": "ERRO_FORMATO", "numero_nota": "000", "cidade": ""}
     
+    # Normaliza chaves
     dados_norm = {}
     for k, v in dados.items():
         k_lower = k.lower().strip()
-        if "numero" in k_lower or "nota" in k_lower: key = "numero_nota"
-        elif "emitente" in k_lower or "prestador" in k_lower: key = "emitente"
+        if any(x in k_lower for x in ["numero", "nota", "nfs", "danfe"]): key = "numero_nota"
+        elif any(x in k_lower for x in ["emitente", "prestador", "social"]): key = "emitente"
         elif "cidade" in k_lower: key = "cidade"
         else: key = k
-        dados_norm[key] = v
+        dados_norm[key] = str(v) if v else ""
     dados = dados_norm
 
-    emitente = str(dados.get('emitente', ''))
-    if 'CPFL' in emitente.upper() or 'PAULISTA DE FORCA' in emitente.upper():
-        emitente = 'CPFL'
-    elif not emitente or emitente.upper() in ["NULL", "NONE", "NÃO IDENTIFICADO", "DESCONHECIDO"]:
-        emitente = "EMITENTE_DESCONHECIDO"
-    dados['emitente'] = emitente
+    # 1. Tratamento de Número (O CRÍTICO)
+    raw_num = dados.get('numero_nota', '')
+    numeros_limpos = re.sub(r'[^\d]', '', raw_num)
 
-    raw_num = str(dados.get('numero_nota', ''))
-    so_digitos = re.sub(r'[^\d]', '', raw_num)
+    # Se a IA não achou número (ou é zero), vamos pro "Pitbull Mode" no texto do PDF
+    if not numeros_limpos or int(numeros_limpos) == 0:
+        if texto_pdf_real:
+            # Padrões específicos baseados no seu arquivo (N°, Nº, No, NF)
+            padroes_resgate = [
+                r"N[°ºo]\s*([0-9\.]+)",       # Pega: N° 000.013.966
+                r"NF[ \-]*e?\s*[:.]?\s*([0-9\.]+)", # Pega: NF- 123
+                r"Número\s*[:.]?\s*([0-9\.]+)"
+            ]
+            for p in padroes_resgate:
+                match = re.search(p, texto_pdf_real, re.IGNORECASE)
+                if match:
+                    # Achou! Limpa pontos e salva
+                    candidato = match.group(1).replace('.', '')
+                    if candidato.isdigit() and int(candidato) > 0:
+                        dados['numero_nota'] = candidato
+                        break
     
-    if so_digitos:
-        dados['numero_nota'] = so_digitos
-    else:
-        dados['numero_nota'] = "000000" 
-        
-    if 'cidade' not in dados:
-        dados['cidade'] = ""
-        
+    # Limpeza final do número
+    final_num = re.sub(r'[^\d]', '', str(dados.get('numero_nota', '')))
+    dados['numero_nota'] = final_num.lstrip('0') if final_num else "000"
+
+    # 2. Tratamento de Emitente
+    emitente = dados.get('emitente', '')
+    if 'CPFL' in emitente.upper(): dados['emitente'] = 'CPFL'
+    elif not emitente or emitente.upper() in ["NULL", "NONE", "NÃO IDENTIFICADO", "DESCONHECIDO"]:
+        dados['emitente'] = "EMITENTE_DESCONHECIDO"
+
+    if 'cidade' not in dados: dados['cidade'] = ""
+    
     return dados
 
 # =====================================================================
@@ -304,12 +307,10 @@ def calcular_delay(tentativa, error_msg):
     if "retry in" in error_msg.lower():
         try:
             return min(float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2, MAX_RETRY_DELAY)
-        except:
-            pass
+        except: pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
 def processar_pagina_gemini(prompt_instrucao, page_stream):
-    """Processa uma página PDF com Gemini com retry e limpeza robusta de JSON"""
     for tentativa in range(MAX_RETRIES + 1):
         try:
             start = time.time()
@@ -320,39 +321,32 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
             )
             tempo = round(time.time() - start, 2)
             
-            # --- MELHORIA: BUSCA JSON MAIS ROBUSTA ---
             texto_raw = resp.text
-            # Tenta encontrar o primeiro { e o último } para isolar o JSON
             try:
+                # Tenta pegar JSON limpo
                 idx_inicio = texto_raw.find('{')
                 idx_fim = texto_raw.rfind('}')
-                
                 if idx_inicio != -1 and idx_fim != -1:
-                    texto_limpo = texto_raw[idx_inicio : idx_fim + 1]
-                    dados = json.loads(texto_limpo)
+                    dados = json.loads(texto_raw[idx_inicio : idx_fim + 1])
                 else:
-                    # Fallback
                     dados = json.loads(texto_raw)
-            except json.JSONDecodeError:
-                 # Último recurso: remover markdown
-                texto_limpo = texto_raw.replace("```json", "").replace("```", "").strip()
-                dados = json.loads(texto_limpo)
-            # ----------------------------------------
+            except:
+                # Fallback forçado
+                clean = texto_raw.replace("```json", "").replace("```", "").strip()
+                try: dados = json.loads(clean)
+                except: dados = {}
 
             return dados, True, tempo, "Gemini"
 
         except ResourceExhausted as e:
             delay = calcular_delay(tentativa, str(e))
-            st.sidebar.warning(f"⚠️ Quota excedida (tentativa {tentativa + 1}/{MAX_RETRIES}). Aguardando {delay}s...")
             time.sleep(delay)
         except Exception as e:
-            if tentativa < MAX_RETRIES:
-                st.sidebar.warning(f"⚠️ Erro Gemini (tentativa {tentativa + 1}/{MAX_RETRIES}): {str(e)}")
-                time.sleep(MIN_RETRY_DELAY)
-            else:
+            if tentativa == MAX_RETRIES:
                 return {"error": str(e)}, False, 0, "Gemini"
+            time.sleep(MIN_RETRY_DELAY)
     
-    return {"error": "Falha máxima de tentativas"}, False, 0, "Gemini"
+    return {"error": "Timeout"}, False, 0, "Gemini"
 
 def processar_pagina_worker(job_data):
     pdf_bytes = job_data["bytes"]
@@ -360,48 +354,48 @@ def processar_pagina_worker(job_data):
     name = job_data["name"]
     page_idx = job_data["page_idx"]
     
+    # [cite_start]1. Extração de Texto Real (Backup para quando a IA falha) [cite: 1, 2]
+    # Usamos o pypdf para ler o texto "por trás" da imagem
+    texto_pdf_real = ""
+    try:
+        reader_temp = PdfReader(io.BytesIO(pdf_bytes))
+        if len(reader_temp.pages) > 0:
+            texto_pdf_real = reader_temp.pages[0].extract_text()
+    except:
+        texto_pdf_real = ""
+
+    # 2. Check Cache
     cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
     cached_result = document_cache.get(cache_key)
     
     if cached_result and job_data["use_cache"]:
         return {
             "status": "CACHE",
-            "dados": cached_result['dados'],
+            "dados": cached_result['dados'], # Nota: Cache antigo pode não ter 'texto_real', mas ok
             "tempo": cached_result['tempo'],
             "provider": cached_result['provider'],
             "name": name,
             "page_idx": page_idx,
-            "pdf_bytes": pdf_bytes
+            "pdf_bytes": pdf_bytes,
+            "texto_real": texto_pdf_real # Passamos o texto novo mesmo com cache
         }
 
+    # 3. Chama Gemini
     page_stream = io.BytesIO(pdf_bytes)
     dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
     
     if ok and "error" not in dados:
-        document_cache.set(cache_key, {
-            'dados': dados,
-            'tempo': tempo,
-            'provider': provider
-        })
+        document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         return {
-            "status": "OK",
-            "dados": dados,
-            "tempo": tempo,
-            "provider": provider,
-            "name": name,
-            "page_idx": page_idx,
-            "pdf_bytes": pdf_bytes
+            "status": "OK", "dados": dados, "tempo": tempo, "provider": provider,
+            "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes,
+            "texto_real": texto_pdf_real # <--- IMPORTANTE: Passa o texto para a validação
         }
     else:
         return {
-            "status": "ERRO",
-            "dados": dados,
-            "tempo": tempo,
-            "provider": provider,
-            "name": name,
-            "page_idx": page_idx,
-            "error_msg": dados.get("error", "Erro desconhecido"),
-            "pdf_bytes": pdf_bytes
+            "status": "ERRO", "dados": dados, "tempo": tempo, "provider": provider,
+            "name": name, "page_idx": page_idx, "error_msg": dados.get("error", "Erro"),
+            "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real
         }
 
 # =====================================================================
@@ -425,44 +419,24 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🏷️ Regras de Renomeação")
-    st.caption("Defina como o robô deve renomear os arquivos encontrados.")
-
     if supabase:
         current_dict = st.session_state.get("db_patterns", {})
         df_padroes = pd.DataFrame(list(current_dict.items()), columns=["origem", "destino"])
         
         df_editado = st.data_editor(
-            df_padroes,
-            num_rows="dynamic",
-            use_container_width=True,
-            hide_index=True,
-            key="editor_patterns",
+            df_padroes, num_rows="dynamic", use_container_width=True, hide_index=True, key="editor_patterns",
             column_config={
                 "origem": st.column_config.TextColumn("📄 Texto no PDF", required=True, width="medium"),
                 "destino": st.column_config.TextColumn("🏷️ Novo Nome", required=True, width="small")
             }
         )
-
-        col_save, col_info = st.columns([0.7, 0.3])
-        with col_save:
-            if st.button("💾 Salvar Regras", type="primary", use_container_width=True):
-                novo_dict = {}
-                for index, row in df_editado.iterrows():
-                    try:
-                        chave = str(row["origem"]).strip().upper()
-                        valor = str(row["destino"]).strip().upper()
-                        if chave and valor and chave != "NONE" and chave != "NAN":
-                            novo_dict[chave] = valor
-                    except: continue
-                
-                with st.spinner("Sincronizando com a nuvem..."):
-                    if sync_patterns_db(novo_dict):
-                        st.session_state["db_patterns"] = novo_dict
-                        st.toast("Regras salvas com sucesso!", icon="✅")
-                        time.sleep(1)
-                        st.rerun()
-        with col_info:
-            st.markdown(f"<div style='text-align:center; font-size:12px; color:gray; padding-top:10px'>{len(current_dict)} regras</div>", unsafe_allow_html=True)
+        if st.button("💾 Salvar Regras", type="primary", use_container_width=True):
+            novo_dict = {str(r["origem"]).strip().upper(): str(r["destino"]).strip().upper() for i, r in df_editado.iterrows() if r["origem"]}
+            if sync_patterns_db(novo_dict):
+                st.session_state["db_patterns"] = novo_dict
+                st.toast("Salvo!", icon="✅")
+                time.sleep(1)
+                st.rerun()
 
 def criar_dashboard_analitico():
     if "resultados" not in st.session_state: return
@@ -471,8 +445,8 @@ def criar_dashboard_analitico():
     resultados = st.session_state["resultados"]
     logs = st.session_state.get("processed_logs", [])
     col1, col2, col3, col4 = st.columns(4)
-    with col1: st.metric("📁 Arquivos Processados", len(resultados))
-    with col2: st.metric("📄 Total de Páginas", sum(r.get('pages', 1) for r in resultados))
+    with col1: st.metric("📁 Arquivos", len(resultados))
+    with col2: st.metric("📄 Páginas", sum(r.get('pages', 1) for r in resultados))
     with col3: st.metric("✅ Sucessos", len([log for log in logs if log[2] == "OK"]))
     with col4: st.metric("❌ Erros", len([log for log in logs if log[2] != "OK"]))
 
@@ -503,36 +477,13 @@ if uploaded_files and process_btn:
         try: arquivos.append({"name": f.name, "bytes": f.read()})
         except: st.warning(f"Erro ao ler {f.name}, ignorado.")
 
-    total_paginas = 0
-    for a in arquivos:
-        try: total_paginas += len(PdfReader(io.BytesIO(a["bytes"])).pages)
-        except: pass
-    st.info(f"📄 Total de páginas a processar: {total_paginas}")
-
-    agrupados_dados = {}
-    resultados_meta = []
-    processed_logs = []
-    processed_count = 0
-    progress_bar = st.progress(0.0)
-    progresso_text = st.empty()
-    start_all = time.time()
-
+    jobs = []
     prompt = (
-        "Atue como um Auditor de Notas Fiscais Brasileiro. Analise a imagem do documento. "
-        "Sua missão é extrair dados mesmo em documentos com layout complexo ou baixa qualidade. "
-        "1. EMITENTE (Prestador): Busque o nome da empresa que PRESTOU o serviço. "
-        "   - Dica: Procure blocos como 'Prestador de Serviços', 'Razão Social' ou o logo no cabeçalho. "
-        "   - Ignore: 'Prefeitura', 'Tomador', 'Receita Federal'. "
-        "2. NÚMERO DA NOTA: Identifique o identificador único do documento. "
-        "   - Dica: Procure por rótulos 'Nº', 'Número', 'NFS-e', 'DANFE', 'Fatura'. "
-        "   - Geralmente está no topo direito ou em destaque negrito. "
-        "3. CIDADE: A cidade do prestador do serviço. "
-        "FORMATO DE RESPOSTA (JSON Puro): "
-        "Responda APENAS um objeto JSON com as chaves: 'emitente', 'numero_nota', 'cidade'. "
-        "Se um campo estiver muito ilegível, tente inferir pelo contexto. Use 'DESCONHECIDO' apenas em último caso."
+        "Extraia dados da Nota Fiscal. Retorne APENAS JSON: "
+        "{'emitente': 'Nome Fantasia ou Razão Social', 'numero_nota': 'Número apenas digitos', 'cidade': 'Nome Cidade'}. "
+        "Se não achar, retorne null."
     )
 
-    jobs = []
     for a in arquivos:
         try:
             reader = PdfReader(io.BytesIO(a["bytes"]))
@@ -542,15 +493,19 @@ if uploaded_files and process_btn:
                 w.add_page(page)
                 w.write(b)
                 jobs.append({
-                    "bytes": b.getvalue(),
-                    "prompt": prompt,
-                    "name": a["name"],
-                    "page_idx": idx,
+                    "bytes": b.getvalue(), "prompt": prompt, "name": a["name"], "page_idx": idx,
                     "use_cache": st.session_state.get("use_cache", True)
                 })
         except Exception as e:
-            processed_logs.append((a["name"], 0, "ERRO_LEITURA", str(e), "System"))
+            st.error(f"Erro ao ler {a['name']}: {e}")
 
+    agrupados_dados = {}
+    processed_logs = []
+    processed_count = 0
+    progress_bar = st.progress(0.0)
+    progresso_text = st.empty()
+    start_all = time.time()
+    
     MAX_WORKERS = 4
     total_jobs = len(jobs) if jobs else 1
     
@@ -565,43 +520,43 @@ if uploaded_files and process_btn:
                 idx = result["page_idx"]
                 page_label = f"{name} (pág {idx+1})"
                 
+                # --- AQUI ESTÁ A MÁGICA: VALIDAÇÃO HÍBRIDA ---
                 if result["status"] == "ERRO":
-                    processed_logs.append((page_label, result["tempo"], "ERRO_IA", result["error_msg"], result["provider"]))
-                    progresso_text.markdown(f"<span class='error-log'>⚠️ {page_label} — FALHA (Salvo para revisão)</span>", unsafe_allow_html=True)
-                    dados = {"emitente": f"REVISAR_{name}", "numero_nota": "000", "cidade": ""}
+                    dados_iniciais = {"emitente": "", "numero_nota": "000", "cidade": ""}
                 else:
-                    dados = validar_e_corrigir_dados(result["dados"])
-                    status_lbl = "CACHE" if result["status"] == "CACHE" else "OK"
-                    css_class = "success-log" if result["status"] == "OK" else "warning-log"
-                    processed_logs.append((page_label, result["tempo"], status_lbl, f"{dados.get('numero_nota')} / {dados.get('emitente')}", result["provider"]))
-                    progresso_text.markdown(f"<span class='{css_class}'>✅ {page_label} — {status_lbl}</span>", unsafe_allow_html=True)
+                    dados_iniciais = result["dados"]
+                
+                # Passamos o texto_real extraído do PDF para a validação tentar salvar
+                dados = validar_e_corrigir_dados(dados_iniciais, result.get("texto_real", ""))
+                
+                status_lbl = "CACHE" if result["status"] == "CACHE" else "OK"
+                css_class = "success-log" if result["status"] == "OK" else "warning-log"
+                
+                log_info = f"{dados.get('numero_nota')} / {dados.get('emitente')}"
+                if dados.get('numero_nota') == "000":
+                    log_info = "REVISAR (Não encontrado)"
+                    css_class = "error-log"
+                    
+                processed_logs.append((page_label, result["tempo"], status_lbl, log_info, result["provider"]))
+                progresso_text.markdown(f"<span class='{css_class}'>✅ {page_label} — {log_info}</span>", unsafe_allow_html=True)
 
                 emitente_raw = dados.get("emitente", "") or f"REVISAR_{idx}"
                 numero_raw = dados.get("numero_nota", "") or "000"
                 cidade_raw = dados.get("cidade", "") or ""
+                
                 numero = limpar_numero(numero_raw)
                 
-                if result["status"] == "ERRO" or numero == "0":
-                     emitente = emitente_raw 
-                else:
-                     nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
-                     emitente = limpar_emitente(nome_map)
-
+                # Lógica de Nomeação
                 if numero == "0" or numero == "000":
-                    key = (f"000_REV_{idx}", emitente)
+                    emitente = emitente_raw
+                    key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente)
                 else:
+                    nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
+                    emitente = limpar_emitente(nome_map)
                     key = (numero, emitente)
 
                 agrupados_dados.setdefault(key, []).append({
-                    "page_idx": idx,
-                    "pdf_bytes": result["pdf_bytes"],
-                    "file_origin": name
-                })
-                
-                status_final = "FALHA_SALVA" if result["status"] == "ERRO" else ("CACHE" if result["status"] == "CACHE" else "OK")
-                resultados_meta.append({
-                    "arquivo_origem": name, "pagina": idx+1, "status": status_final, 
-                    "tempo_s": round(result["tempo"], 2), "provider": result["provider"]
+                    "page_idx": idx, "pdf_bytes": result["pdf_bytes"], "file_origin": name
                 })
 
             except Exception as e:
@@ -612,9 +567,7 @@ if uploaded_files and process_btn:
     files_meta = {}
     
     for (numero, emitente), pages_list in agrupados_dados.items():
-        if not numero or numero == "0": continue
         pages_list.sort(key=lambda x: (x['file_origin'], x['page_idx']))
-
         writer = PdfWriter()
         for p_data in pages_list:
             try:
@@ -625,95 +578,77 @@ if uploaded_files and process_btn:
         emitente_safe = limpar_para_nome_arquivo(emitente)
         nome_pdf = f"DOC {numero}_{emitente_safe}.pdf"
         caminho = session_folder / nome_pdf
-        
         with open(caminho, "wb") as f_out: writer.write(f_out)
             
         resultados.append({"file": nome_pdf, "numero": numero, "emitente": emitente, "pages": len(pages_list)})
         files_meta[nome_pdf] = {"numero": numero, "emitente": emitente, "pages": len(pages_list)}
 
-    # --- MELHORIA: LIMPEZA DE MEMÓRIA APÓS PROCESSAMENTO PESADO ---
     gc.collect() 
-    # -------------------------------------------------------------
-
     st.session_state["resultados"] = resultados
     st.session_state["session_folder"] = str(session_folder)
     st.session_state["novos_nomes"] = {r["file"]: r["file"] for r in resultados}
     st.session_state["processed_logs"] = processed_logs
     st.session_state["files_meta"] = files_meta
 
-    st.toast(f"Processamento Finalizado! {len(resultados)} arquivos gerados.", icon="🎉")
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s.")
-    
     criar_dashboard_analitico()
     st.rerun()
 
 if "resultados" in st.session_state:
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown("### Gerenciamento — selecione e aplique ações")
+    st.markdown("### Gerenciamento")
     resultados = st.session_state["resultados"]
     session_folder = Path(st.session_state["session_folder"])
     novos_nomes = st.session_state.get("novos_nomes", {r["file"]: r["file"] for r in resultados})
     files_meta = st.session_state.get("files_meta", {})
 
     col1, col2, col3, col4 = st.columns([3, 2, 2, 3])
-    with col1: q = st.text_input("🔎 Buscar", value="", placeholder="parte do nome, emitente ou número")
-    with col2: sort_by = st.selectbox("Ordenar por", ["Nome (A-Z)", "Nome (Z-A)", "Número (asc)", "Número (desc)"], index=0)
-    with col3: show_logs = st.checkbox("Mostrar logs", value=False)
+    with col1: q = st.text_input("🔎 Buscar", placeholder="...")
+    with col2: sort_by = st.selectbox("Ordenar", ["Nome (A-Z)", "Nome (Z-A)", "Número (asc)", "Número (desc)"])
+    with col3: show_logs = st.checkbox("Logs")
     with col4:
-        st.write("")
-        top_actions_cols = st.columns([1, 1, 1])
-        with top_actions_cols[0]:
-            if st.button("⬇️ Zip"):
+        c_act = st.columns(3)
+        with c_act[0]:
+            if st.button("⬇️"):
                 sel = st.session_state.get("selected_files", [])
-                if not sel: st.warning("Selecione itens.")
-                else:
+                if sel:
                     mem = io.BytesIO()
                     with zipfile.ZipFile(mem, "w") as zf:
                         for f in sel:
                             src = session_folder / f
                             if src.exists(): zf.write(src, arcname=novos_nomes.get(f, f))
                     mem.seek(0)
-                    st.download_button("💾", data=mem, file_name="selecionadas.zip", mime="application/zip")
-
-        with top_actions_cols[1]:
-            if st.button("🗑️ Del"):
+                    st.download_button("💾", data=mem, file_name="sel.zip", mime="application/zip")
+        with c_act[1]:
+            if st.button("🗑️"):
                 sel = st.session_state.get("selected_files", [])
-                if not sel: st.warning("Selecione itens.")
-                else:
+                if sel:
                     for f in sel:
-                        src = session_folder / f
-                        try:
-                            if src.exists(): src.unlink()
+                        try: (session_folder/f).unlink()
                         except: pass
                         st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != f]
-                        st.session_state["novos_nomes"].pop(f, None)
-                        st.session_state["files_meta"].pop(f, None)
                     st.session_state["selected_files"] = []
                     st.rerun()
-
-        with top_actions_cols[2]:
-            if st.button("🔗 Unir"):
+        with c_act[2]:
+            if st.button("🔗"):
                 sel = st.session_state.get("selected_files", [])
-                if len(sel) < 2: st.warning("Selecione + de 1")
-                else:
-                    try:
-                        merger = PdfWriter()
-                        for fname in sorted(sel):
-                            src = session_folder / fname
-                            if src.exists():
-                                reader = PdfReader(str(src))
-                                for page in reader.pages: merger.add_page(page)
-                        new_name = f"AGRUPADO_{int(time.time())}.pdf"
-                        with open(session_folder / new_name, "wb") as f: merger.write(f)
-                        new_meta = {"file": new_name, "numero": "AGRUP", "emitente": "VÁRIOS", "pages": len(merger.pages)}
-                        st.session_state["resultados"].insert(0, new_meta)
-                        st.session_state["files_meta"][new_name] = new_meta
-                        st.session_state["novos_nomes"][new_name] = new_name
-                        st.rerun()
-                    except Exception as e: st.error(f"Erro: {e}")
+                if len(sel) > 1:
+                    m = PdfWriter()
+                    for f in sorted(sel):
+                        try:
+                            r = PdfReader(str(session_folder/f))
+                            for p in r.pages: m.add_page(p)
+                        except: pass
+                    nm = f"AGRUPADO_{int(time.time())}.pdf"
+                    with open(session_folder/nm, "wb") as f: m.write(f)
+                    meta = {"file": nm, "numero": "AGRUP", "emitente": "VÁRIOS", "pages": len(m.pages)}
+                    st.session_state["resultados"].insert(0, meta)
+                    st.session_state["files_meta"][nm] = meta
+                    st.session_state["novos_nomes"][nm] = nm
+                    st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
-
+    
     visible = resultados.copy()
     if q:
         q_up = q.strip().upper()
@@ -724,127 +659,90 @@ if "resultados" in st.session_state:
     else: visible.sort(key=lambda x: int(x["numero"]) if x["numero"].isdigit() else 0, reverse=True)
 
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown("### 📁 Notas processadas")
     if "selected_files" not in st.session_state: st.session_state["selected_files"] = []
-
+    
     for r in visible:
-        fname = r["file"]
-        meta = files_meta.get(fname, {})
-        cols = st.columns([0.05, 0.50, 0.25, 0.20])
-        
-        checked = fname in st.session_state.get("selected_files", [])
-        cb = cols[0].checkbox("", value=checked, key=f"cb_{fname}")
-        if cb and fname not in st.session_state["selected_files"]: st.session_state["selected_files"].append(fname)
-        if (not cb) and fname in st.session_state["selected_files"]: st.session_state["selected_files"].remove(fname)
-
-        novos_nomes[fname] = cols[1].text_input(label=fname, value=novos_nomes.get(fname, fname), key=f"rename_{fname}", label_visibility="collapsed")
-        cols[2].markdown(f"<div class='small-note'>{meta.get('emitente','-')}<br>Nº {meta.get('numero','-')} • {r.get('pages',1)} pág(s)</div>", unsafe_allow_html=True)
-        if cols[3].button("⚙️ Gerenciar", key=f"manage_{fname}"):
-            st.session_state["_manage_target"] = fname
+        fn = r["file"]
+        ck = fn in st.session_state["selected_files"]
+        c = st.columns([0.05, 0.5, 0.25, 0.2])
+        if c[0].checkbox("", value=ck, key=f"cb_{fn}"):
+            if fn not in st.session_state["selected_files"]: st.session_state["selected_files"].append(fn)
+        else:
+            if fn in st.session_state["selected_files"]: st.session_state["selected_files"].remove(fn)
+            
+        novos_nomes[fn] = c[1].text_input(fn, value=novos_nomes.get(fn, fn), key=f"ren_{fn}", label_visibility="collapsed")
+        c[2].caption(f"{r['emitente']}<br>Nº {r['numero']}", unsafe_allow_html=True)
+        if c[3].button("⚙️", key=f"m_{fn}"):
+            st.session_state["_manage_target"] = fn
             st.rerun()
+            
     st.markdown("</div>", unsafe_allow_html=True)
-
+    
+    # --- GERENCIADOR SIMPLIFICADO ---
     if "_manage_target" in st.session_state:
-        manage_target = st.session_state["_manage_target"]
-        if not any(r["file"] == manage_target for r in st.session_state.get("resultados", [])):
-            st.session_state.pop("_manage_target", None)
+        tgt = st.session_state["_manage_target"]
+        if not (session_folder/tgt).exists():
+            st.session_state.pop("_manage_target")
             st.rerun()
-        
+            
         st.markdown('<div class="manage-panel">', unsafe_allow_html=True)
-        col_tit, col_x = st.columns([0.9, 0.1])
-        col_tit.markdown(f"### ⚙️ Gerenciar: `{manage_target}`")
-        if col_x.button("❌", key=f"close_{manage_target}"):
-            st.session_state.pop("_manage_target", None)
+        c1, c2 = st.columns([0.9, 0.1])
+        c1.markdown(f"**{tgt}**")
+        if c2.button("❌"):
+            st.session_state.pop("_manage_target")
             st.rerun()
-        
-        file_path = session_folder / manage_target
-        with st.expander("👁️ Visualizar Arquivo Completo", expanded=True):
-            if file_path.exists(): pdf_viewer(input=str(file_path), width=700, height=800)
-            else: st.warning("Arquivo não encontrado no disco.")
-
+            
+        with st.expander("👁️ Ver PDF", expanded=True):
+            pdf_viewer(str(session_folder/tgt), height=600)
+            
+        # Ações de Separar/Remover Páginas (Mantidas simples)
         try:
-            reader = PdfReader(str(file_path))
-            pages_info = [{"idx": i, "label": f"Página {i+1}"} for i in range(len(reader.pages))]
-        except: pages_info = []
-        
-        if pages_info:
-            sel_key = f"_manage_sel_{manage_target}"
-            if sel_key not in st.session_state: st.session_state[sel_key] = []
+            r = PdfReader(str(session_folder/tgt))
+            pgs = [f"Pág {i+1}" for i in range(len(r.pages))]
+            sel_pgs = st.multiselect("Selecionar páginas", range(len(pgs)), format_func=lambda x: pgs[x])
             
-            col_sel, col_actions = st.columns([1, 2])
-            with col_sel:
-                st.markdown("**Selecionar páginas:**")
-                for page in pages_info:
-                    if st.checkbox(page["label"], value=page["idx"] in st.session_state[sel_key], key=f"{sel_key}_{page['idx']}"):
-                        if page["idx"] not in st.session_state[sel_key]: st.session_state[sel_key].append(page["idx"])
+            c_a, c_b = st.columns(2)
+            if c_a.button("Separar Selecionadas"):
+                if sel_pgs:
+                    nw = PdfWriter()
+                    for i in sorted(sel_pgs): nw.add_page(r.pages[i])
+                    nn = f"{tgt[:-4]}_parte.pdf"
+                    with open(session_folder/nn, "wb") as f: nw.write(f)
+                    nm = {"file": nn, "numero": r["numero"], "emitente": r["emitente"], "pages": len(sel_pgs)}
+                    st.session_state["resultados"].append(nm)
+                    st.session_state["files_meta"][nn] = nm
+                    st.session_state["novos_nomes"][nn] = nn
+                    st.success(f"Criado: {nn}")
+            
+            if c_b.button("Remover Selecionadas"):
+                if sel_pgs:
+                    nw = PdfWriter()
+                    for i in range(len(r.pages)):
+                        if i not in sel_pgs: nw.add_page(r.pages[i])
+                    if len(nw.pages) > 0:
+                        with open(session_folder/tgt, "wb") as f: nw.write(f)
+                        # Atualiza estado
+                        st.session_state["files_meta"][tgt]["pages"] = len(nw.pages)
+                        for x in st.session_state["resultados"]:
+                            if x["file"] == tgt: x["pages"] = len(nw.pages)
+                        st.rerun()
                     else:
-                        if page["idx"] in st.session_state[sel_key]: st.session_state[sel_key].remove(page["idx"])
-            
-            with col_actions:
-                st.write(f"📑 Selecionadas: **{len(st.session_state.get(sel_key, []))}**")
-                new_name_key = f"_newname_{manage_target}"
-                if new_name_key not in st.session_state: st.session_state[new_name_key] = f"{manage_target.rsplit('.pdf', 1)[0]}_parte.pdf"
-                new_name = st.text_input("Nome:", key=new_name_key)
-                
-                c1, c2 = st.columns(2)
-                if c1.button("➗ Separar", key=f"sep_{manage_target}"):
-                    sel = sorted(st.session_state.get(sel_key, []))
-                    if sel:
-                        try:
-                            nw = PdfWriter()
-                            r = PdfReader(str(file_path))
-                            for i in sel: nw.add_page(r.pages[i])
-                            with open(session_folder / new_name, "wb") as f: nw.write(f)
-                            new_meta = {"file": new_name, "numero": files_meta.get(manage_target, {}).get("numero", ""), "emitente": files_meta.get(manage_target, {}).get("emitente", ""), "pages": len(sel)}
-                            st.session_state["resultados"].append(new_meta)
-                            st.session_state["files_meta"][new_name] = new_meta
-                            st.session_state["novos_nomes"][new_name] = new_name
-                            st.session_state[sel_key] = []
-                            st.rerun()
-                        except Exception as e: st.error(str(e))
-                
-                if c2.button("🗑️ Remover", key=f"rem_{manage_target}"):
-                    sel = sorted(st.session_state.get(sel_key, []))
-                    if sel:
-                        try:
-                            nw = PdfWriter()
-                            r = PdfReader(str(file_path))
-                            for i in range(len(r.pages)):
-                                if i not in sel: nw.add_page(r.pages[i])
-                            if len(nw.pages) > 0:
-                                with open(file_path, "wb") as f: nw.write(f)
-                                st.session_state["files_meta"][manage_target]["pages"] = len(nw.pages)
-                                for res in st.session_state["resultados"]: 
-                                    if res["file"] == manage_target: res["pages"] = len(nw.pages)
-                                st.session_state[sel_key] = []
-                                st.rerun()
-                            else:
-                                file_path.unlink()
-                                st.session_state["resultados"] = [r for r in st.session_state["resultados"] if r["file"] != manage_target]
-                                st.session_state.pop("_manage_target", None)
-                                st.rerun()
-                        except Exception as e: st.error(str(e))
+                        (session_folder/tgt).unlink()
+                        st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != tgt]
+                        st.session_state.pop("_manage_target")
+                        st.rerun()
+        except: pass
         st.markdown("</div>", unsafe_allow_html=True)
 
-    criar_dashboard_analitico()
-
-    if show_logs and st.session_state.get("processed_logs"):
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("### 📝 Logs")
-        for entry in st.session_state["processed_logs"][-200:]:
-            label, t, status, info, provider = (entry + ("", "", ""))[:5]
-            css = "success-log" if status == "OK" else "warning-log"
-            st.markdown(f"<div class='{css}'>{status} | {label} — {info}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
+    if show_logs:
+        st.write(st.session_state.get("processed_logs", [])[-10:])
+    
     st.markdown("---")
-    mem = io.BytesIO()
-    with zipfile.ZipFile(mem, "w") as zf:
-        for r in st.session_state.get("resultados", []):
-            src = session_folder / r["file"]
-            if src.exists():
-                fn = st.session_state.get("novos_nomes", {}).get(r["file"], r["file"])
-                if not fn.lower().endswith(".pdf"): fn += ".pdf"
-                zf.write(src, arcname=fn)
-    mem.seek(0)
-    st.download_button(label="⬇️ Baixar Tudo (.zip)", data=mem, file_name="notas.zip", mime="application/zip", use_container_width=True, type="primary")
+    if st.button("⬇️ BAIXAR TUDO (.ZIP)", type="primary", use_container_width=True):
+        mem = io.BytesIO()
+        with zipfile.ZipFile(mem, "w") as zf:
+            for r in resultados:
+                src = session_folder / r["file"]
+                if src.exists(): zf.write(src, arcname=novos_nomes.get(r["file"], r["file"]))
+        mem.seek(0)
+        st.download_button("Clique para salvar", data=mem, file_name="final.zip", mime="application/zip")
