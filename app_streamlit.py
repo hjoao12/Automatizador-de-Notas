@@ -1,4 +1,4 @@
-import os  # <--- CORREÇÃO 1: Faltava importar 'os'
+import os
 import io
 import time
 import json
@@ -92,7 +92,6 @@ document_cache = DocumentCache()
 # =====================================================================
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GEMINI_API_KEY:
-    # Tenta pegar dos secrets se não estiver no env
     try: GEMINI_API_KEY = st.secrets["GOOGLE_API_KEY"]
     except: pass
 
@@ -102,8 +101,9 @@ if not GEMINI_API_KEY:
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.0-flash")) # Atualizado para flash
-    # Não mostramos mensagem de sucesso na sidebar para limpar visual
+    # Dica: gemini-1.5-flash costuma ser mais estável para OCR massivo que o 2.0-flash (preview)
+    # Se der erro, tente trocar "models/gemini-2.0-flash" por "gemini-1.5-flash"
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.0-flash")) 
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
     st.stop()
@@ -123,17 +123,14 @@ MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "15"))
 # =====================================================================
 @st.cache_resource
 def init_supabase():
-    # Correção 3: Tenta pegar de Secrets E Environment Variable
     url = None
     key = None
     
-    # Tentativa 1: Secrets (Streamlit Cloud)
     try:
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
     except: pass
 
-    # Tentativa 2: Environment (.env local)
     if not url:
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_KEY")
@@ -150,7 +147,6 @@ def get_patterns_db():
         response = supabase.table("invoice_patterns").select("*").execute()
         return {item["origin"]: item["target"] for item in response.data}
     except Exception as e:
-        # Silencioso para não assustar o usuário se o DB cair, usa local
         print(f"Erro ao ler banco: {e}")
         return {}
 
@@ -234,20 +230,20 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     raw_num = dados.get('numero_nota', '')
     numeros_limpos = re.sub(r'[^\d]', '', raw_num)
 
-    if not numeros_limpos or int(numeros_limpos) == 0:
-        if texto_pdf_real:
-            padroes_resgate = [
-                r"N[°ºo]\s*([0-9\.]+)",
-                r"NF[ \-]*e?\s*[:.]?\s*([0-9\.]+)",
-                r"Número\s*[:.]?\s*([0-9\.]+)"
-            ]
-            for p in padroes_resgate:
-                match = re.search(p, texto_pdf_real, re.IGNORECASE)
-                if match:
-                    candidato = match.group(1).replace('.', '')
-                    if candidato.isdigit() and int(candidato) > 0:
-                        dados['numero_nota'] = candidato
-                        break
+    # Se a IA falhou no número E temos texto real (não escaneado), tentamos regex
+    if (not numeros_limpos or int(numeros_limpos) == 0) and texto_pdf_real:
+        padroes_resgate = [
+            r"N[°ºo]\s*([0-9\.]+)",
+            r"NF[ \-]*e?\s*[:.]?\s*([0-9\.]+)",
+            r"Número\s*[:.]?\s*([0-9\.]+)"
+        ]
+        for p in padroes_resgate:
+            match = re.search(p, texto_pdf_real, re.IGNORECASE)
+            if match:
+                candidato = match.group(1).replace('.', '')
+                if candidato.isdigit() and int(candidato) > 0:
+                    dados['numero_nota'] = candidato
+                    break
     
     final_num = re.sub(r'[^\d]', '', str(dados.get('numero_nota', '')))
     dados['numero_nota'] = final_num.lstrip('0') if final_num else "000"
@@ -275,6 +271,7 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
     for tentativa in range(MAX_RETRIES + 1):
         try:
             start = time.time()
+            # Envia o PDF como MIME type 'application/pdf' para ativar a visão do modelo
             resp = model.generate_content(
                 [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
                 generation_config={"response_mime_type": "application/json"},
@@ -375,7 +372,6 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🏷️ Regras de Renomeação")
-    # Usa DB se tiver, senão usa memória da sessão
     if "db_patterns" not in st.session_state:
         st.session_state["db_patterns"] = {}
         
@@ -439,11 +435,22 @@ if uploaded_files and process_btn:
         except: st.warning(f"Erro ao ler {f.name}, ignorado.")
 
     jobs = []
-    prompt = (
-        "Extraia dados da Nota Fiscal. Retorne APENAS JSON: "
-        "{'emitente': 'Nome Fantasia ou Razão Social', 'numero_nota': 'Número apenas digitos', 'cidade': 'Nome Cidade'}. "
-        "Se não achar, retorne null."
-    )
+    
+    # --- MODIFICAÇÃO PRINCIPAL: Prompt Otimizado para OCR ---
+    # Instrução explícita para tratar o arquivo como imagem (scan)
+    prompt = """
+    Analise este documento fiscal (Nota Fiscal ou Boleto). 
+    Se for uma imagem escaneada (foto), use VISÃO COMPUTACIONAL (OCR) para ler os dados visualmente.
+    Não dependa de texto selecionável.
+
+    Extraia:
+    1. 'emitente': Razão Social ou Nome Fantasia de quem emitiu a nota (topo do documento). Se ilegível ou não encontrar, retorne "EMITENTE_DESCONHECIDO".
+    2. 'numero_nota': Número da Nota Fiscal (apenas dígitos). Se não encontrar, retorne "000".
+    3. 'cidade': Nome da cidade do emitente.
+
+    Retorne APENAS um JSON válido com a chaves exatas: "emitente", "numero_nota", "cidade".
+    """
+    # ---------------------------------------------------------
 
     for a in arquivos:
         try:
