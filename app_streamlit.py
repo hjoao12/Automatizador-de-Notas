@@ -1,4 +1,4 @@
-import os
+import os  # <--- CORREÇÃO 1: Faltava importar 'os'
 import io
 import time
 import json
@@ -28,69 +28,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 load_dotenv()
 st.set_page_config(
     page_title="Automatizador de Notas Fiscais",
-    page_icon="icone.ico"
+    page_icon="📄",
+    layout="wide"
 )
 
 # ======= CSS Corporativo Claro =======
 st.markdown("""
 <style>
-body {
-  background-color: #f8f9fa;
-  color: #212529;
-  font-family: 'Segoe UI', Roboto, Arial, sans-serif;
-}
-[data-testid="stSidebar"] {
-  background-color: #ffffff;
-  border-right: 1px solid #e9ecef;
-}
-h1, h2, h3, h4 {
-  color: #0f4c81;
-}
-div.stButton > button {
-  background-color: #0f4c81;
-  color: white;
-  border-radius: 8px;
-  border: none;
-  font-weight: 500;
-}
-div.stButton > button:hover {
-  background-color: #0b3a5a;
-}
-.stProgress > div > div > div > div {
-  background-color: #28a745 !important;
-}
-.success-log {
-  color: #155724;
-  background-color: #d4edda;
-  padding: 6px 10px;
-  border-radius: 6px;
-}
-.warning-log {
-  color: #856404;
-  background-color: #fff3cd;
-  padding: 6px 10px;
-  border-radius: 6px;
-}
-.error-log {
-  color: #721c24;
-  background-color: #f8d7da;
-  padding: 6px 10px;
-  border-radius: 6px;
-}
-.top-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-.block-container {
-  padding-top: 2rem;
-}
-.small-note {
-  font-size:13px;
-  color:#6b7280;
-}
-.card { background: #fff; padding: 12px; border-radius:8px; box-shadow: 0 6px 18px rgba(15,76,129,0.04); margin-bottom:12px; }
-.metric-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 10px; }
+body { background-color: #f8f9fa; color: #212529; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
+[data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e9ecef; }
+h1, h2, h3, h4 { color: #0f4c81; }
+div.stButton > button { background-color: #0f4c81; color: white; border-radius: 8px; border: none; font-weight: 500; }
+div.stButton > button:hover { background-color: #0b3a5a; }
+.stProgress > div > div > div > div { background-color: #28a745 !important; }
+.success-log { color: #155724; background-color: #d4edda; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; }
+.warning-log { color: #856404; background-color: #fff3cd; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; }
+.error-log { color: #721c24; background-color: #f8d7da; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; }
+.card { background: #fff; padding: 15px; border-radius:8px; box-shadow: 0 4px 12px rgba(15,76,129,0.08); margin-bottom:15px; }
 .manage-panel { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0f4c81; margin: 10px 0; }
 </style>
 """, unsafe_allow_html=True)
@@ -138,13 +92,18 @@ document_cache = DocumentCache()
 # =====================================================================
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GEMINI_API_KEY:
-    st.error("❌ Chave GOOGLE_API_KEY não encontrada.")
+    # Tenta pegar dos secrets se não estiver no env
+    try: GEMINI_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    except: pass
+
+if not GEMINI_API_KEY:
+    st.error("❌ Chave GOOGLE_API_KEY não encontrada (.env ou secrets).")
     st.stop()
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash"))
-    st.sidebar.success("✅ Gemini configurado")
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.0-flash")) # Atualizado para flash
+    # Não mostramos mensagem de sucesso na sidebar para limpar visual
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
     st.stop()
@@ -155,21 +114,33 @@ except Exception as e:
 TEMP_FOLDER = Path("./temp")
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
-MAX_TOTAL_PAGES = int(os.getenv("MAX_TOTAL_PAGES", "50"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
-MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "5"))
-MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "30"))
+MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "2"))
+MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "15"))
 
 # =====================================================================
 # GESTÃO DE PADRÕES (VIA SUPABASE)
 # =====================================================================
 @st.cache_resource
 def init_supabase():
+    # Correção 3: Tenta pegar de Secrets E Environment Variable
+    url = None
+    key = None
+    
+    # Tentativa 1: Secrets (Streamlit Cloud)
     try:
         url = st.secrets["supabase"]["url"]
         key = st.secrets["supabase"]["key"]
+    except: pass
+
+    # Tentativa 2: Environment (.env local)
+    if not url:
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_KEY")
+
+    if url and key:
         return create_client(url, key)
-    except: return None
+    return None
 
 supabase = init_supabase()
 
@@ -179,7 +150,8 @@ def get_patterns_db():
         response = supabase.table("invoice_patterns").select("*").execute()
         return {item["origin"]: item["target"] for item in response.data}
     except Exception as e:
-        st.error(f"Erro ao ler banco: {e}")
+        # Silencioso para não assustar o usuário se o DB cair, usa local
+        print(f"Erro ao ler banco: {e}")
         return {}
 
 def sync_patterns_db(new_dict):
@@ -243,17 +215,12 @@ def limpar_para_nome_arquivo(texto):
 
 # --- LÓGICA HÍBRIDA: AI + REGEX NO TEXTO REAL ---
 def validar_e_corrigir_dados(dados, texto_pdf_real=""):
-    """
-    Se a IA falhar no número, usamos Regex no texto extraído diretamente do PDF.
-    Isso resolve o caso 'N° 000.013.966' que a IA ignora.
-    """
     if not isinstance(dados, dict):
         if isinstance(dados, list) and len(dados) > 0 and isinstance(dados[0], dict):
             dados = dados[0]
         else:
             return {"emitente": "ERRO_FORMATO", "numero_nota": "000", "cidade": ""}
     
-    # Normaliza chaves
     dados_norm = {}
     for k, v in dados.items():
         k_lower = k.lower().strip()
@@ -264,36 +231,29 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
         dados_norm[key] = str(v) if v else ""
     dados = dados_norm
 
-    # 1. Tratamento de Número (O CRÍTICO)
     raw_num = dados.get('numero_nota', '')
     numeros_limpos = re.sub(r'[^\d]', '', raw_num)
 
-    # Se a IA não achou número (ou é zero), vamos pro "Pitbull Mode" no texto do PDF
     if not numeros_limpos or int(numeros_limpos) == 0:
         if texto_pdf_real:
-            # Padrões específicos baseados no seu arquivo (N°, Nº, No, NF)
             padroes_resgate = [
-                r"N[°ºo]\s*([0-9\.]+)",       # Pega: N° 000.013.966
-                r"NF[ \-]*e?\s*[:.]?\s*([0-9\.]+)", # Pega: NF- 123
+                r"N[°ºo]\s*([0-9\.]+)",
+                r"NF[ \-]*e?\s*[:.]?\s*([0-9\.]+)",
                 r"Número\s*[:.]?\s*([0-9\.]+)"
             ]
             for p in padroes_resgate:
                 match = re.search(p, texto_pdf_real, re.IGNORECASE)
                 if match:
-                    # Achou! Limpa pontos e salva
                     candidato = match.group(1).replace('.', '')
                     if candidato.isdigit() and int(candidato) > 0:
                         dados['numero_nota'] = candidato
                         break
     
-    # Limpeza final do número
     final_num = re.sub(r'[^\d]', '', str(dados.get('numero_nota', '')))
     dados['numero_nota'] = final_num.lstrip('0') if final_num else "000"
 
-    # 2. Tratamento de Emitente
     emitente = dados.get('emitente', '')
-    if 'CPFL' in emitente.upper(): dados['emitente'] = 'CPFL'
-    elif not emitente or emitente.upper() in ["NULL", "NONE", "NÃO IDENTIFICADO", "DESCONHECIDO"]:
+    if not emitente or emitente.upper() in ["NULL", "NONE", "NÃO IDENTIFICADO", "DESCONHECIDO"]:
         dados['emitente'] = "EMITENTE_DESCONHECIDO"
 
     if 'cidade' not in dados: dados['cidade'] = ""
@@ -306,7 +266,8 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
 def calcular_delay(tentativa, error_msg):
     if "retry in" in error_msg.lower():
         try:
-            return min(float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1)) + 2, MAX_RETRY_DELAY)
+            val = float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1))
+            return min(val + 1, MAX_RETRY_DELAY)
         except: pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
@@ -331,7 +292,6 @@ def processar_pagina_gemini(prompt_instrucao, page_stream):
                 else:
                     dados = json.loads(texto_raw)
             except:
-                # Fallback forçado
                 clean = texto_raw.replace("```json", "").replace("```", "").strip()
                 try: dados = json.loads(clean)
                 except: dados = {}
@@ -354,33 +314,29 @@ def processar_pagina_worker(job_data):
     name = job_data["name"]
     page_idx = job_data["page_idx"]
     
-    # [cite_start]1. Extração de Texto Real (Backup para quando a IA falha) [cite: 1, 2]
-    # Usamos o pypdf para ler o texto "por trás" da imagem
     texto_pdf_real = ""
     try:
         reader_temp = PdfReader(io.BytesIO(pdf_bytes))
         if len(reader_temp.pages) > 0:
-            texto_pdf_real = reader_temp.pages[0].extract_text()
+            texto_pdf_real = reader_temp.pages[0].extract_text() or ""
     except:
         texto_pdf_real = ""
 
-    # 2. Check Cache
     cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
     cached_result = document_cache.get(cache_key)
     
     if cached_result and job_data["use_cache"]:
         return {
             "status": "CACHE",
-            "dados": cached_result['dados'], # Nota: Cache antigo pode não ter 'texto_real', mas ok
+            "dados": cached_result['dados'],
             "tempo": cached_result['tempo'],
             "provider": cached_result['provider'],
             "name": name,
             "page_idx": page_idx,
             "pdf_bytes": pdf_bytes,
-            "texto_real": texto_pdf_real # Passamos o texto novo mesmo com cache
+            "texto_real": texto_pdf_real
         }
 
-    # 3. Chama Gemini
     page_stream = io.BytesIO(pdf_bytes)
     dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
     
@@ -389,7 +345,7 @@ def processar_pagina_worker(job_data):
         return {
             "status": "OK", "dados": dados, "tempo": tempo, "provider": provider,
             "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes,
-            "texto_real": texto_pdf_real # <--- IMPORTANTE: Passa o texto para a validação
+            "texto_real": texto_pdf_real
         }
     else:
         return {
@@ -404,9 +360,9 @@ def processar_pagina_worker(job_data):
 with st.sidebar:
     st.markdown("### ⚙️ Painel de Controle")
     if supabase:
-        st.markdown("Status: <span style='color:green'><b>● Conectado à Nuvem</b></span>", unsafe_allow_html=True)
+        st.markdown("Status DB: <span style='color:green'><b>● Conectado</b></span>", unsafe_allow_html=True)
     else:
-        st.error("🔴 Sem conexão com Supabase")
+        st.markdown("Status DB: <span style='color:orange'><b>● Local (Offline)</b></span>", unsafe_allow_html=True)
     st.markdown("---")
     
     with st.expander("🛠️ Preferências", expanded=False):
@@ -419,24 +375,29 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🏷️ Regras de Renomeação")
-    if supabase:
-        current_dict = st.session_state.get("db_patterns", {})
-        df_padroes = pd.DataFrame(list(current_dict.items()), columns=["origem", "destino"])
+    # Usa DB se tiver, senão usa memória da sessão
+    if "db_patterns" not in st.session_state:
+        st.session_state["db_patterns"] = {}
         
-        df_editado = st.data_editor(
-            df_padroes, num_rows="dynamic", use_container_width=True, hide_index=True, key="editor_patterns",
-            column_config={
-                "origem": st.column_config.TextColumn("📄 Texto no PDF", required=True, width="medium"),
-                "destino": st.column_config.TextColumn("🏷️ Novo Nome", required=True, width="small")
-            }
-        )
-        if st.button("💾 Salvar Regras", type="primary", use_container_width=True):
-            novo_dict = {str(r["origem"]).strip().upper(): str(r["destino"]).strip().upper() for i, r in df_editado.iterrows() if r["origem"]}
-            if sync_patterns_db(novo_dict):
-                st.session_state["db_patterns"] = novo_dict
-                st.toast("Salvo!", icon="✅")
-                time.sleep(1)
-                st.rerun()
+    current_dict = st.session_state["db_patterns"]
+    df_padroes = pd.DataFrame(list(current_dict.items()), columns=["origem", "destino"])
+    
+    df_editado = st.data_editor(
+        df_padroes, num_rows="dynamic", use_container_width=True, hide_index=True, key="editor_patterns",
+        column_config={
+            "origem": st.column_config.TextColumn("📄 Texto no PDF", required=True, width="medium"),
+            "destino": st.column_config.TextColumn("🏷️ Novo Nome", required=True, width="small")
+        }
+    )
+    if st.button("💾 Salvar Regras", type="primary", use_container_width=True):
+        novo_dict = {str(r["origem"]).strip().upper(): str(r["destino"]).strip().upper() for i, r in df_editado.iterrows() if r["origem"]}
+        st.session_state["db_patterns"] = novo_dict # Atualiza local
+        if sync_patterns_db(novo_dict): # Tenta atualizar nuvem
+            st.toast("Salvo na Nuvem!", icon="☁️")
+        else:
+            st.toast("Salvo Localmente!", icon="💻")
+        time.sleep(1)
+        st.rerun()
 
 def criar_dashboard_analitico():
     if "resultados" not in st.session_state: return
@@ -445,26 +406,26 @@ def criar_dashboard_analitico():
     resultados = st.session_state["resultados"]
     logs = st.session_state.get("processed_logs", [])
     col1, col2, col3, col4 = st.columns(4)
-    with col1: st.metric("📁 Arquivos", len(resultados))
-    with col2: st.metric("📄 Páginas", sum(r.get('pages', 1) for r in resultados))
+    with col1: st.metric("📁 Arquivos Gerados", len(resultados))
+    with col2: st.metric("📄 Páginas Processadas", sum(r.get('pages', 1) for r in resultados))
     with col3: st.metric("✅ Sucessos", len([log for log in logs if log[2] == "OK"]))
-    with col4: st.metric("❌ Erros", len([log for log in logs if log[2] != "OK"]))
+    with col4: st.metric("⚠️ Cache/Erros", len([log for log in logs if log[2] != "OK"]))
 
 st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown("### 📎 Enviar PDFs e processar ")
-uploaded_files = st.file_uploader("Selecione arquivos PDF", type=["pdf"], accept_multiple_files=True, key="uploader")
+st.markdown("### 📎 Enviar PDFs")
+uploaded_files = st.file_uploader("Arraste e solte seus PDFs aqui", type=["pdf"], accept_multiple_files=True, key="uploader")
 col_up_a, col_up_b = st.columns([1,1])
-with col_up_a: process_btn = st.button("🚀 Processar PDFs")
-with col_up_b: clear_session = st.button("♻️ Limpar sessão")
+with col_up_a: process_btn = st.button("🚀 Processar PDFs", type="primary", use_container_width=True)
+with col_up_b: clear_session = st.button("♻️ Limpar sessão", use_container_width=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 if clear_session:
     if "session_folder" in st.session_state:
         try: shutil.rmtree(st.session_state["session_folder"])
         except: pass
-    for k in ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]:
+    keys_to_clear = ["resultados", "session_folder", "novos_nomes", "processed_logs", "files_meta", "selected_files", "_manage_target"]
+    for k in keys_to_clear:
         if k in st.session_state: del st.session_state[k]
-    st.success("Sessão limpa.")
     st.rerun()
 
 if uploaded_files and process_btn:
@@ -520,25 +481,23 @@ if uploaded_files and process_btn:
                 idx = result["page_idx"]
                 page_label = f"{name} (pág {idx+1})"
                 
-                # --- AQUI ESTÁ A MÁGICA: VALIDAÇÃO HÍBRIDA ---
                 if result["status"] == "ERRO":
                     dados_iniciais = {"emitente": "", "numero_nota": "000", "cidade": ""}
                 else:
                     dados_iniciais = result["dados"]
                 
-                # Passamos o texto_real extraído do PDF para a validação tentar salvar
                 dados = validar_e_corrigir_dados(dados_iniciais, result.get("texto_real", ""))
                 
                 status_lbl = "CACHE" if result["status"] == "CACHE" else "OK"
                 css_class = "success-log" if result["status"] == "OK" else "warning-log"
                 
-                log_info = f"{dados.get('numero_nota')} / {dados.get('emitente')}"
+                log_info = f"{dados.get('numero_nota')} | {dados.get('emitente')[:20]}"
                 if dados.get('numero_nota') == "000":
                     log_info = "REVISAR (Não encontrado)"
                     css_class = "error-log"
                     
                 processed_logs.append((page_label, result["tempo"], status_lbl, log_info, result["provider"]))
-                progresso_text.markdown(f"<span class='{css_class}'>✅ {page_label} — {log_info}</span>", unsafe_allow_html=True)
+                progresso_text.markdown(f"<span class='{css_class}'>✅ Processado: {page_label}</span>", unsafe_allow_html=True)
 
                 emitente_raw = dados.get("emitente", "") or f"REVISAR_{idx}"
                 numero_raw = dados.get("numero_nota", "") or "000"
@@ -546,7 +505,6 @@ if uploaded_files and process_btn:
                 
                 numero = limpar_numero(numero_raw)
                 
-                # Lógica de Nomeação
                 if numero == "0" or numero == "000":
                     emitente = emitente_raw
                     key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente)
@@ -560,7 +518,8 @@ if uploaded_files and process_btn:
                 })
 
             except Exception as e:
-                st.error(f"Erro crítico: {e}")
+                st.error(f"Erro crítico no loop: {e}")
+            
             progress_bar.progress(min(processed_count/total_jobs, 1.0))
 
     resultados = []
@@ -592,24 +551,25 @@ if uploaded_files and process_btn:
 
     st.success(f"✅ Processamento concluído em {round(time.time() - start_all, 2)}s.")
     criar_dashboard_analitico()
+    time.sleep(1)
     st.rerun()
 
 if "resultados" in st.session_state:
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown("### Gerenciamento")
+    st.markdown("### 🗂️ Gerenciamento")
     resultados = st.session_state["resultados"]
     session_folder = Path(st.session_state["session_folder"])
     novos_nomes = st.session_state.get("novos_nomes", {r["file"]: r["file"] for r in resultados})
     files_meta = st.session_state.get("files_meta", {})
 
     col1, col2, col3, col4 = st.columns([3, 2, 2, 3])
-    with col1: q = st.text_input("🔎 Buscar", placeholder="...")
-    with col2: sort_by = st.selectbox("Ordenar", ["Nome (A-Z)", "Nome (Z-A)", "Número (asc)", "Número (desc)"])
-    with col3: show_logs = st.checkbox("Logs")
+    with col1: q = st.text_input("🔎 Buscar", placeholder="Emitente ou número...", label_visibility="collapsed")
+    with col2: sort_by = st.selectbox("Ordenar", ["Nome (A-Z)", "Nome (Z-A)", "Número (asc)", "Número (desc)"], label_visibility="collapsed")
+    with col3: show_logs = st.toggle("Ver Logs")
     with col4:
         c_act = st.columns(3)
         with c_act[0]:
-            if st.button("⬇️"):
+            if st.button("⬇️", help="Baixar Selecionados"):
                 sel = st.session_state.get("selected_files", [])
                 if sel:
                     mem = io.BytesIO()
@@ -618,9 +578,9 @@ if "resultados" in st.session_state:
                             src = session_folder / f
                             if src.exists(): zf.write(src, arcname=novos_nomes.get(f, f))
                     mem.seek(0)
-                    st.download_button("💾", data=mem, file_name="sel.zip", mime="application/zip")
+                    st.download_button("💾", data=mem, file_name="selecionados.zip", mime="application/zip")
         with c_act[1]:
-            if st.button("🗑️"):
+            if st.button("🗑️", help="Excluir Selecionados"):
                 sel = st.session_state.get("selected_files", [])
                 if sel:
                     for f in sel:
@@ -630,7 +590,7 @@ if "resultados" in st.session_state:
                     st.session_state["selected_files"] = []
                     st.rerun()
         with c_act[2]:
-            if st.button("🔗"):
+            if st.button("🔗", help="Unir Selecionados"):
                 sel = st.session_state.get("selected_files", [])
                 if len(sel) > 1:
                     m = PdfWriter()
@@ -653,6 +613,7 @@ if "resultados" in st.session_state:
     if q:
         q_up = q.strip().upper()
         visible = [r for r in visible if q_up in r["file"].upper() or q_up in r["emitente"].upper() or q_up in r["numero"]]
+    
     if sort_by == "Nome (A-Z)": visible.sort(key=lambda x: x["file"])
     elif sort_by == "Nome (Z-A)": visible.sort(key=lambda x: x["file"], reverse=True)
     elif sort_by == "Número (asc)": visible.sort(key=lambda x: int(x["numero"]) if x["numero"].isdigit() else 0)
@@ -671,14 +632,14 @@ if "resultados" in st.session_state:
             if fn in st.session_state["selected_files"]: st.session_state["selected_files"].remove(fn)
             
         novos_nomes[fn] = c[1].text_input(fn, value=novos_nomes.get(fn, fn), key=f"ren_{fn}", label_visibility="collapsed")
-        c[2].caption(f"{r['emitente']}<br>Nº {r['numero']}", unsafe_allow_html=True)
-        if c[3].button("⚙️", key=f"m_{fn}"):
+        c[2].caption(f"🏢 {r['emitente']}<br>🔢 Nº {r['numero']}", unsafe_allow_html=True)
+        if c[3].button("⚙️ Editar", key=f"m_{fn}"):
             st.session_state["_manage_target"] = fn
             st.rerun()
             
     st.markdown("</div>", unsafe_allow_html=True)
     
-    # --- GERENCIADOR SIMPLIFICADO ---
+    # --- GERENCIADOR DETALHADO ---
     if "_manage_target" in st.session_state:
         tgt = st.session_state["_manage_target"]
         if not (session_folder/tgt).exists():
@@ -687,55 +648,75 @@ if "resultados" in st.session_state:
             
         st.markdown('<div class="manage-panel">', unsafe_allow_html=True)
         c1, c2 = st.columns([0.9, 0.1])
-        c1.markdown(f"**{tgt}**")
-        if c2.button("❌"):
+        c1.markdown(f"🛠️ Editando: **{tgt}**")
+        if c2.button("❌", help="Fechar"):
             st.session_state.pop("_manage_target")
             st.rerun()
             
-        with st.expander("👁️ Ver PDF", expanded=True):
+        with st.expander("👁️ Visualizar PDF", expanded=True):
             pdf_viewer(str(session_folder/tgt), height=600)
             
-        # Ações de Separar/Remover Páginas (Mantidas simples)
+        # Ações de Separar/Remover Páginas
         try:
-            r = PdfReader(str(session_folder/tgt))
-            pgs = [f"Pág {i+1}" for i in range(len(r.pages))]
-            sel_pgs = st.multiselect("Selecionar páginas", range(len(pgs)), format_func=lambda x: pgs[x])
+            reader_obj = PdfReader(str(session_folder/tgt))
+            total_pgs = len(reader_obj.pages)
+            pgs = [f"Pág {i+1}" for i in range(total_pgs)]
+            sel_pgs = st.multiselect("Selecionar páginas para ação:", range(total_pgs), format_func=lambda x: pgs[x])
+            
+            # Recupera metadados do dicionário auxiliar (Correção CRÍTICA 2)
+            meta_original = st.session_state["files_meta"].get(tgt, {"numero": "000", "emitente": "DESC"})
             
             c_a, c_b = st.columns(2)
-            if c_a.button("Separar Selecionadas"):
+            if c_a.button("✂️ Separar Selecionadas (Criar novo PDF)"):
                 if sel_pgs:
                     nw = PdfWriter()
-                    for i in sorted(sel_pgs): nw.add_page(r.pages[i])
+                    for i in sorted(sel_pgs): nw.add_page(reader_obj.pages[i])
+                    
                     nn = f"{tgt[:-4]}_parte.pdf"
                     with open(session_folder/nn, "wb") as f: nw.write(f)
-                    nm = {"file": nn, "numero": r["numero"], "emitente": r["emitente"], "pages": len(sel_pgs)}
+                    
+                    nm = {
+                        "file": nn, 
+                        "numero": meta_original["numero"], 
+                        "emitente": meta_original["emitente"], 
+                        "pages": len(sel_pgs)
+                    }
                     st.session_state["resultados"].append(nm)
                     st.session_state["files_meta"][nn] = nm
                     st.session_state["novos_nomes"][nn] = nn
                     st.success(f"Criado: {nn}")
             
-            if c_b.button("Remover Selecionadas"):
+            if c_b.button("🗑️ Remover Selecionadas (Do PDF atual)"):
                 if sel_pgs:
                     nw = PdfWriter()
-                    for i in range(len(r.pages)):
-                        if i not in sel_pgs: nw.add_page(r.pages[i])
-                    if len(nw.pages) > 0:
+                    keep_count = 0
+                    for i in range(total_pgs):
+                        if i not in sel_pgs: 
+                            nw.add_page(reader_obj.pages[i])
+                            keep_count += 1
+                    
+                    if keep_count > 0:
                         with open(session_folder/tgt, "wb") as f: nw.write(f)
-                        # Atualiza estado
-                        st.session_state["files_meta"][tgt]["pages"] = len(nw.pages)
+                        
+                        # Atualiza estado e metadados
+                        st.session_state["files_meta"][tgt]["pages"] = keep_count
                         for x in st.session_state["resultados"]:
-                            if x["file"] == tgt: x["pages"] = len(nw.pages)
+                            if x["file"] == tgt: x["pages"] = keep_count
                         st.rerun()
                     else:
+                        # Se removeu tudo, deleta o arquivo
                         (session_folder/tgt).unlink()
                         st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != tgt]
                         st.session_state.pop("_manage_target")
                         st.rerun()
-        except: pass
+        except Exception as e:
+            st.error(f"Erro ao manipular PDF: {e}")
         st.markdown("</div>", unsafe_allow_html=True)
 
     if show_logs:
-        st.write(st.session_state.get("processed_logs", [])[-10:])
+        st.caption("Logs recentes:")
+        for log in st.session_state.get("processed_logs", [])[-10:]:
+            st.text(f"{log[2]} | {log[3]} ({log[1]}s)")
     
     st.markdown("---")
     if st.button("⬇️ BAIXAR TUDO (.ZIP)", type="primary", use_container_width=True):
@@ -745,4 +726,4 @@ if "resultados" in st.session_state:
                 src = session_folder / r["file"]
                 if src.exists(): zf.write(src, arcname=novos_nomes.get(r["file"], r["file"]))
         mem.seek(0)
-        st.download_button("Clique para salvar", data=mem, file_name="final.zip", mime="application/zip")
+        st.download_button("Clique para salvar o ZIP final", data=mem, file_name="notas_fiscais_processadas.zip", mime="application/zip")
