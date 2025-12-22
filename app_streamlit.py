@@ -262,7 +262,8 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
         dados['cidade'] = ""
     
     return dados
-    def extrair_cabecalho_pagina(pdf_bytes, page_idx, dpi=220):
+
+def extrair_cabecalho_pagina(pdf_bytes, page_idx, dpi=220):
     images = convert_from_bytes(
         pdf_bytes,
         dpi=dpi,
@@ -354,9 +355,6 @@ def processar_pagina_worker(job_data):
             "pdf_bytes": pdf_bytes,
             "texto_real": ""
         }
-
-    dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
-
 
     dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
     
