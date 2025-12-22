@@ -253,7 +253,7 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     emitente = dados.get('emitente', '').strip()
 
     if not emitente:
-    dados['emitente'] = "EMITENTE_DESCONHECIDO"
+        dados['emitente'] = "EMITENTE_DESCONHECIDO"
     else:
         dados['emitente'] = emitente
 
