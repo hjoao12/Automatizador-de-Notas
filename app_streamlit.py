@@ -341,45 +341,67 @@ def processar_pagina_gemini(prompt, image_bytes):
 
 def processar_pagina_worker(job_data, crop_ratio_override=None):
     """
-    Processa uma única página de PDF usando OCR/AI (Gemini),
-    com validação de existência de páginas, logs detalhados e fallback seguro.
+    Processa uma única página de PDF.
+    CORREÇÃO: Como o PDF recebido aqui já é fatiado (tem apenas 1 página),
+    sempre lemos o índice 0 para extração, mas mantemos o page_idx original para logs.
     """
     pdf_bytes = job_data["bytes"]
     prompt = job_data["prompt"]
     name = job_data["name"]
-    page_idx = job_data["page_idx"]
+    page_idx_original = job_data["page_idx"] # Índice real do documento original (ex: 5)
+    
+    # Dentro deste worker, o PDF só tem 1 página, então o índice local é sempre 0
+    page_idx_local = 0 
     texto_pdf_real = ""
 
     try:
         # --- Validação do PDF ---
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
-        if page_idx >= total_pages:
+        
+        # Se o PDF chegou vazio ou sem páginas
+        if total_pages == 0:
             return {
                 "status": "ERRO",
                 "dados": {"emitente": "", "numero_nota": "000", "cidade": ""},
                 "tempo": 0,
                 "provider": "",
                 "name": name,
-                "page_idx": page_idx,
-                "error_msg": f"Página {page_idx+1} inexistente (total {total_pages})",
+                "page_idx": page_idx_original,
+                "error_msg": "PDF vazio ou corrompido recebido no worker",
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
             }
 
         # --- Extrair imagem da página (INTEIRA) ---
-        # AQUI ESTAVA O ERRO: Havia código sobrando aqui embaixo.
-        img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx)
-        
-        if img_bytes is None:
-             return {
+        try:
+            # CORREÇÃO CRÍTICA: Usamos page_idx_local (0) e não o original
+            img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx_local)
+            
+            if img_bytes is None:
+                 return {
+                    "status": "ERRO",
+                    "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
+                    "tempo": 0,
+                    "provider": "System",
+                    "name": name,
+                    "page_idx": page_idx_original,
+                    "error_msg": "Falha ao converter PDF para Imagem",
+                    "pdf_bytes": pdf_bytes,
+                    "texto_real": texto_pdf_real
+                }
+
+        except Exception as e_img:
+            error_msg = f"Erro no PDF2IMAGE (Poppler instalado?): {e_img}"
+            print(error_msg)
+            return {
                 "status": "ERRO",
                 "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
                 "tempo": 0,
                 "provider": "System",
                 "name": name,
-                "page_idx": page_idx,
-                "error_msg": "Falha ao converter PDF para Imagem",
+                "page_idx": page_idx_original,
+                "error_msg": error_msg,
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
             }
@@ -388,14 +410,13 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         cache_key = document_cache.get_cache_key(img_bytes, prompt)
         cached_result = document_cache.get(cache_key)
         if cached_result and job_data.get("use_cache", True):
-            return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
+            return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
 
         # --- Chamada ao Gemini ---
-        st.write(f"[DEBUG] Chamando Gemini para {name}, página {page_idx+1}, bytes={len(img_bytes)}")
+        st.write(f"[DEBUG] Chamando Gemini para {name}, pág {page_idx_original+1}")
         try:
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
-            # Log no terminal para vermos o que a IA está respondendo
-            print(f"RESPOSTA IA ({name}): {dados}") 
+            print(f"RESPOSTA IA ({name} - Pág {page_idx_original+1}): {dados}") 
         except Exception as e_gem:
             return {
                 "status": "ERRO",
@@ -403,7 +424,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "tempo": 0,
                 "provider": "",
                 "name": name,
-                "page_idx": page_idx,
+                "page_idx": page_idx_original,
                 "error_msg": f"Erro Gemini: {e_gem}",
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
@@ -413,36 +434,34 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         if not dados or not isinstance(dados, dict):
             dados = {"emitente": "", "numero_nota": "000", "cidade": ""}
 
-        # --- Armazenar no cache SOMENTE SE achou dados úteis ---
+        # --- Armazenar no cache ---
         tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
         
-        # Resultado Final
         resultado_final = {
             "status": "OK" if ok else "ERRO",
             "dados": dados,
             "tempo": tempo,
             "provider": provider,
             "name": name,
-            "page_idx": page_idx,
+            "page_idx": page_idx_original,
             "pdf_bytes": pdf_bytes,
             "texto_real": texto_pdf_real
         }
 
-        # Só salva no cache se tiver sucesso E dados
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         
         return resultado_final
 
     except Exception as e_outer:
-        print(f"ERRO CRITICO WORKER: {e_outer}") # Isso vai aparecer no seu terminal
+        print(f"ERRO CRITICO WORKER: {e_outer}")
         return {
             "status": "ERRO",
             "dados": {"emitente": "", "numero_nota": "000", "cidade": ""},
             "tempo": 0,
             "provider": "",
             "name": name,
-            "page_idx": page_idx,
+            "page_idx": page_idx_original if 'page_idx_original' in locals() else 0,
             "error_msg": f"Erro crítico: {e_outer}",
             "pdf_bytes": pdf_bytes,
             "texto_real": texto_pdf_real
