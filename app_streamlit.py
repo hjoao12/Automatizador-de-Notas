@@ -258,7 +258,8 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
         dados['emitente'] = emitente
 
 
-    if 'cidade' not in dados: dados['cidade'] = ""
+    if 'cidade' not in dados:
+        dados['cidade'] = ""
     
     return dados
     def extrair_cabecalho_pagina(pdf_bytes, page_idx, dpi=220):
@@ -357,7 +358,6 @@ def processar_pagina_worker(job_data):
     dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
 
 
-    page_stream = io.BytesIO(pdf_bytes)
     dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
     
     if ok and "error" not in dados:
