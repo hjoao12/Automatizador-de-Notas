@@ -105,7 +105,7 @@ try:
     genai.configure(api_key=GEMINI_API_KEY)
     # Dica: gemini-1.5-flash costuma ser mais estável para OCR massivo que o 2.0-flash (preview)
     # Se der erro, tente trocar "models/gemini-2.0-flash" por "gemini-1.5-flash"
-    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-2.5-flash")) 
+    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-1.5-flash")) 
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
     st.stop()
@@ -328,16 +328,16 @@ def processar_pagina_gemini(prompt, image_bytes):
                 # Limpeza básica caso venha com markdown ```json ... ```
                 text = response.text.replace("```json", "").replace("```", "")
                 dados = json.loads(text)
-                return dados, True, elapsed, "Gemini 2.5"
+                return dados, True, elapsed, "Gemini 1.5"
             except json.JSONDecodeError:
                 print(f"\n[DEBUG] FALHA JSON: {response.text}\n") 
-                return {"error": "Falha ao decodificar JSON"}, False, elapsed, "Gemini 2.5"
+                return {"error": "Falha ao decodificar JSON"}, False, elapsed, "Gemini 1.5"
         else:
-            return {"error": "Resposta vazia da IA"}, False, elapsed, "Gemini 2.5"
+            return {"error": "Resposta vazia da IA"}, False, elapsed, "Gemini 1.5"
 
     except Exception as e:
         elapsed = time.time() - start_time
-        return {"error": f"Erro API: {str(e)}"}, False, elapsed, "Gemini 2.5"
+        return {"error": f"Erro API: {str(e)}"}, False, elapsed, "Gemini 1.5"
 
 def processar_pagina_worker(job_data, crop_ratio_override=None):
     """
@@ -605,7 +605,7 @@ Retorne APENAS um JSON válido com estas chaves exatas:
                     status_lbl = "OK"
                 else:
                     status_lbl = "ERRO"
-                    
+
                 css_class = "success-log" if result["status"] == "OK" else "warning-log"
                 
                 log_info = f"{dados.get('numero_nota')} | {dados.get('emitente')[:20]}"
