@@ -592,30 +592,28 @@ Retorne APENAS um JSON válido com estas chaves exatas:
                 idx = result["page_idx"]
                 page_label = f"{name} (pág {idx+1})"
                 
+                # --- DENTRO DO LOOP FOR (as_completed) ---
+                
                 if result["status"] == "ERRO":
+                    # MUDANÇA AQUI: Pegar a mensagem real do erro
+                    msg_erro = result.get("error_msg") or result.get("dados", {}).get("error") or "Erro desconhecido"
+                    log_info = f"FALHA: {msg_erro}"
+                    css_class = "error-log"
+                    # Define dados vazios para não quebrar o resto, mas já logamos o erro
                     dados_iniciais = {"emitente": "", "numero_nota": "000", "cidade": ""}
                 else:
                     dados_iniciais = result["dados"]
-                
-                dados = validar_e_corrigir_dados(dados_iniciais, result.get("texto_real", ""))
-                
-                if result["status"] == "CACHE":
-                    status_lbl = "CACHE"
-                elif result["status"] == "OK":
-                    status_lbl = "OK"
-                else:
-                    status_lbl = "ERRO"
+                    # ... resto do código normal ...
+                    log_info = f"{dados.get('numero_nota')} | {dados.get('emitente')[:20]}"
+                    if dados.get('numero_nota') == "000":
+                        log_info = "REVISAR (Não encontrado)"
+                        css_class = "warning-log"
+                    else:
+                        css_class = "success-log"
 
-                css_class = "success-log" if result["status"] == "OK" else "warning-log"
-                
-                log_info = f"{dados.get('numero_nota')} | {dados.get('emitente')[:20]}"
-                if dados.get('numero_nota') == "000":
-                    log_info = "REVISAR (Não encontrado)"
-                    css_class = "error-log"
-                    
-                processed_logs.append((page_label, result["tempo"], status_lbl, log_info, result["provider"]))
-                progresso_text.markdown(f"<span class='{css_class}'>✅ Processado: {page_label}</span>", unsafe_allow_html=True)
-
+                # Atualiza a lista de logs e o texto na tela
+                processed_logs.append((page_label, result["tempo"], result["status"], log_info, result["provider"]))
+                progresso_text.markdown(f"<span class='{css_class}'>📝 {page_label}: {log_info}</span>", unsafe_allow_html=True)
                 emitente_raw = dados.get("emitente", "") or f"REVISAR_{idx}"
                 numero_raw = dados.get("numero_nota", "") or "000"
                 cidade_raw = dados.get("cidade", "") or ""
