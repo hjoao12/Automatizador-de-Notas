@@ -368,30 +368,24 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             }
 
         # --- Extrair imagem da página (INTEIRA) ---
-        img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx)
-        
-        if img_bytes is None:
-             # Retorna erro se falhar na conversão
-             return {
-                "status": "ERRO",
-                "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
-                "tempo": 0,
-                "provider": "System",
-                "name": name,
-                "page_idx": page_idx,
-                "error_msg": "Falha ao converter PDF para Imagem",
-                "pdf_bytes": pdf_bytes,
-                "texto_real": texto_pdf_real
-            }
+        # Bloco Try específico para captura de imagem
+        try:
+            img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx)
+            
+            if img_bytes is None:
+                # Retorna erro se falhar na conversão
+                return {
+                    "status": "ERRO",
+                    "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
+                    "tempo": 0,
+                    "provider": "System",
+                    "name": name,
+                    "page_idx": page_idx,
+                    "error_msg": "Falha ao converter PDF para Imagem",
+                    "pdf_bytes": pdf_bytes,
+                    "texto_real": texto_pdf_real
+                }
 
-            # Crop adaptativo (opcional override)
-            crop_ratio = crop_ratio_override or (0.35 if h < 3500 else 0.40)
-            header = img.crop((0, 0, w, int(h * crop_ratio)))
-
-            buf = io.BytesIO()
-            header.save(buf, format="PNG", optimize=True)
-            buf.seek(0)
-            img_bytes = buf.getvalue()
         except Exception as e_img:
             error_msg = f"Erro no PDF2IMAGE (Poppler instalado?): {e_img}"
             print(error_msg)
@@ -438,7 +432,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         # --- Armazenar no cache SOMENTE SE achou dados úteis ---
         tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
         
-        # CORREÇÃO AQUI: Montamos o resultado padrão
+        # Monta o resultado final
         resultado_final = {
             "status": "OK" if ok else "ERRO",
             "dados": dados,
@@ -450,11 +444,10 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             "texto_real": texto_pdf_real
         }
 
-        # Só salva no cache se tiver dados bons, mas retorna SEMPRE
+        # Só salva no cache se tiver dados bons
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         
-        # OBRIGATÓRIO: Retornar o resultado mesmo que não tenha sido salvo no cache
         return resultado_final
 
     except Exception as e_outer:
@@ -469,7 +462,6 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             "pdf_bytes": pdf_bytes,
             "texto_real": texto_pdf_real
         }
-
 # =====================================================================
 # UI & MAIN FLOW
 # =====================================================================
