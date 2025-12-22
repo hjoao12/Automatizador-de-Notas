@@ -10,3 +10,5 @@ pypdf
 streamlit-pdf-viewer
 supabase
 pandas
+pdf2image
+Pillow

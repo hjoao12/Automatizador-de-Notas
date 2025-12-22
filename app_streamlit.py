@@ -19,6 +19,8 @@ from pypdf import PdfReader, PdfWriter
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
 import streamlit as st
+from pdf2image import convert_from_bytes
+from PIL import Image
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -251,7 +253,7 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     emitente = dados.get('emitente', '').strip()
 
     if not emitente:
-     dados['emitente'] = "EMITENTE_DESCONHECIDO"
+    dados['emitente'] = "EMITENTE_DESCONHECIDO"
     else:
         dados['emitente'] = emitente
 
@@ -259,6 +261,26 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     if 'cidade' not in dados: dados['cidade'] = ""
     
     return dados
+    def extrair_cabecalho_pagina(pdf_bytes, page_idx, dpi=220):
+    images = convert_from_bytes(
+        pdf_bytes,
+        dpi=dpi,
+        first_page=page_idx + 1,
+        last_page=page_idx + 1
+    )
+
+    img = images[0]
+    w, h = img.size
+
+    # Crop adaptativo (topo da DANFE)
+    crop_ratio = 0.35 if h < 3500 else 0.40
+    header = img.crop((0, 0, w, int(h * crop_ratio)))
+
+    buf = io.BytesIO()
+    header.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
 
 # =====================================================================
 # PROCESSAMENTO GEMINI
@@ -271,42 +293,39 @@ def calcular_delay(tentativa, error_msg):
         except: pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
-def processar_pagina_gemini(prompt_instrucao, page_stream):
+def processar_pagina_gemini(prompt_instrucao, img_bytes):
     for tentativa in range(MAX_RETRIES + 1):
         try:
             start = time.time()
-            # Envia o PDF como MIME type 'application/pdf' para ativar a visão do modelo
+
             resp = model.generate_content(
-                [prompt_instrucao, {"mime_type": "application/pdf", "data": page_stream.getvalue()}],
+                [
+                    prompt_instrucao,
+                    {"mime_type": "image/png", "data": img_bytes}
+                ],
                 generation_config={"response_mime_type": "application/json"},
-                request_options={'timeout': 60}
+                request_options={"timeout": 60}
             )
+
             tempo = round(time.time() - start, 2)
-            
             texto_raw = resp.text
+
             try:
-                # Tenta pegar JSON limpo
-                idx_inicio = texto_raw.find('{')
-                idx_fim = texto_raw.rfind('}')
-                if idx_inicio != -1 and idx_fim != -1:
-                    dados = json.loads(texto_raw[idx_inicio : idx_fim + 1])
-                else:
-                    dados = json.loads(texto_raw)
+                ini = texto_raw.find("{")
+                fim = texto_raw.rfind("}")
+                dados = json.loads(texto_raw[ini:fim+1])
             except:
-                clean = texto_raw.replace("```json", "").replace("```", "").strip()
-                try: dados = json.loads(clean)
-                except: dados = {}
+                dados = {}
 
             return dados, True, tempo, "Gemini"
 
         except ResourceExhausted as e:
-            delay = calcular_delay(tentativa, str(e))
-            time.sleep(delay)
+            time.sleep(calcular_delay(tentativa, str(e)))
         except Exception as e:
             if tentativa == MAX_RETRIES:
                 return {"error": str(e)}, False, 0, "Gemini"
             time.sleep(MIN_RETRY_DELAY)
-    
+
     return {"error": "Timeout"}, False, 0, "Gemini"
 
 def processar_pagina_worker(job_data):
@@ -317,9 +336,12 @@ def processar_pagina_worker(job_data):
     
     texto_pdf_real = ""
 
-    cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
+    img_header = extrair_cabecalho_pagina(pdf_bytes, page_idx)
+    img_bytes = img_header.getvalue()
+
+    cache_key = document_cache.get_cache_key(img_bytes, prompt)
     cached_result = document_cache.get(cache_key)
-    
+
     if cached_result and job_data["use_cache"]:
         return {
             "status": "CACHE",
@@ -329,8 +351,11 @@ def processar_pagina_worker(job_data):
             "name": name,
             "page_idx": page_idx,
             "pdf_bytes": pdf_bytes,
-            "texto_real": texto_pdf_real
+            "texto_real": ""
         }
+
+    dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
+
 
     page_stream = io.BytesIO(pdf_bytes)
     dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
