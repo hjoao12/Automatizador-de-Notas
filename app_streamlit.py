@@ -248,9 +248,12 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     final_num = re.sub(r'[^\d]', '', str(dados.get('numero_nota', '')))
     dados['numero_nota'] = final_num.lstrip('0') if final_num else "000"
 
-    emitente = dados.get('emitente', '')
-    if not emitente or emitente.upper() in ["NULL", "NONE", "NÃO IDENTIFICADO", "DESCONHECIDO"]:
-        dados['emitente'] = "EMITENTE_DESCONHECIDO"
+    emitente = dados.get('emitente', '').strip()
+    if not emitente:
+     dados['emitente'] = "EMITENTE_DESCONHECIDO"
+    else:
+    dados['emitente'] = emitente
+
 
     if 'cidade' not in dados: dados['cidade'] = ""
     
@@ -311,12 +314,6 @@ def processar_pagina_worker(job_data):
     name = job_data["name"]
     page_idx = job_data["page_idx"]
     
-    texto_pdf_real = ""
-    try:
-        reader_temp = PdfReader(io.BytesIO(pdf_bytes))
-        if len(reader_temp.pages) > 0:
-            texto_pdf_real = reader_temp.pages[0].extract_text() or ""
-    except:
         texto_pdf_real = ""
 
     cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
@@ -439,17 +436,24 @@ if uploaded_files and process_btn:
     # --- MODIFICAÇÃO PRINCIPAL: Prompt Otimizado para OCR ---
     # Instrução explícita para tratar o arquivo como imagem (scan)
     prompt = """
-    Analise este documento fiscal (Nota Fiscal ou Boleto). 
-    Se for uma imagem escaneada (foto), use VISÃO COMPUTACIONAL (OCR) para ler os dados visualmente.
-    Não dependa de texto selecionável.
+Documento: NOTA FISCAL BRASILEIRA (NF-e / DANFE), PDF ESCANEADO (imagem).
 
-    Extraia:
-    1. 'emitente': Razão Social ou Nome Fantasia de quem emitiu a nota (topo do documento). Se ilegível ou não encontrar, retorne "EMITENTE_DESCONHECIDO".
-    2. 'numero_nota': Número da Nota Fiscal (apenas dígitos). Se não encontrar, retorne "000".
-    3. 'cidade': Nome da cidade do emitente.
+Use SOMENTE visão computacional (OCR). Não dependa de texto selecionável.
 
-    Retorne APENAS um JSON válido com a chaves exatas: "emitente", "numero_nota", "cidade".
-    """
+Extraia visualmente:
+- "emitente": nome ou razão social do emissor (topo do documento)
+- "numero_nota": número da nota fiscal (apenas dígitos)
+- "cidade": cidade do emissor
+
+Se não encontrar:
+- emitente: "EMITENTE_DESCONHECIDO"
+- numero_nota: "000"
+- cidade: ""
+
+Retorne APENAS um JSON válido com estas chaves exatas:
+{ "emitente": "", "numero_nota": "", "cidade": "" }
+"""
+
     # ---------------------------------------------------------
 
     for a in arquivos:
@@ -513,8 +517,8 @@ if uploaded_files and process_btn:
                 numero = limpar_numero(numero_raw)
                 
                 if numero == "0" or numero == "000":
-                    emitente = emitente_raw
-                    key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente)
+                    emitente = f"REVISAR_{limpar_emitente(emitente_raw)}"
+                    key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente)     
                 else:
                     nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
                     emitente = limpar_emitente(nome_map)
