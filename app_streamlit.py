@@ -253,7 +253,7 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     if not emitente:
      dados['emitente'] = "EMITENTE_DESCONHECIDO"
     else:
-    dados['emitente'] = emitente
+        dados['emitente'] = emitente
 
 
     if 'cidade' not in dados: dados['cidade'] = ""
@@ -315,7 +315,7 @@ def processar_pagina_worker(job_data):
     name = job_data["name"]
     page_idx = job_data["page_idx"]
     
-     texto_pdf_real = ""
+    texto_pdf_real = ""
 
     cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
     cached_result = document_cache.get(cache_key)
