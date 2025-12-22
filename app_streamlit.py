@@ -263,26 +263,33 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     
     return dados
 
-def extrair_cabecalho_pagina(pdf_bytes, page_idx, dpi=220):
-    images = convert_from_bytes(
-        pdf_bytes,
-        dpi=dpi,
-        first_page=page_idx + 1,
-        last_page=page_idx + 1
-    )
+def extrair_pagina_inteira(pdf_bytes, page_idx, dpi=200):
+    try:
+        images = convert_from_bytes(
+            pdf_bytes,
+            dpi=dpi,
+            first_page=page_idx + 1,
+            last_page=page_idx + 1
+        )
+        img = images[0]
+        
+        # OTIMIZAÇÃO: Redimensionar se for muito grande para não estourar payload
+        # Mantendo a proporção, limitamos a largura a 2000px (suficiente para OCR)
+        if img.width > 2000:
+            ratio = 2000 / float(img.width)
+            new_height = int(float(img.height) * ratio)
+            img = img.resize((2000, new_height), Image.Resampling.LANCZOS)
 
-    img = images[0]
-    w, h = img.size
+        # NÃO FAZEMOS MAIS O CROP (header = img.crop...)
+        # Enviamos a imagem inteira para a IA achar o emitente onde ele estiver.
 
-    # Crop adaptativo (topo da DANFE)
-    crop_ratio = 0.35 if h < 3500 else 0.40
-    header = img.crop((0, 0, w, int(h * crop_ratio)))
-
-    buf = io.BytesIO()
-    header.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    return buf
-
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85, optimize=True)
+        buf.seek(0)
+        return buf.getvalue()
+    except Exception as e:
+        print(f"Erro na conversão de imagem: {e}")
+        return None
 
 # =====================================================================
 # PROCESSAMENTO GEMINI
@@ -360,16 +367,22 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "texto_real": texto_pdf_real
             }
 
-        # --- Extrair imagem da página (cabeçalho) ---
-        try:
-            images = convert_from_bytes(
-                pdf_bytes,
-                dpi=220,
-                first_page=page_idx + 1,
-                last_page=page_idx + 1
-            )
-            img = images[0]
-            w, h = img.size
+        # --- Extrair imagem da página (INTEIRA) ---
+        img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx)
+        
+        if img_bytes is None:
+             # Retorna erro se falhar na conversão
+             return {
+                "status": "ERRO",
+                "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
+                "tempo": 0,
+                "provider": "System",
+                "name": name,
+                "page_idx": page_idx,
+                "error_msg": "Falha ao converter PDF para Imagem",
+                "pdf_bytes": pdf_bytes,
+                "texto_real": texto_pdf_real
+            }
 
             # Crop adaptativo (opcional override)
             crop_ratio = crop_ratio_override or (0.35 if h < 3500 else 0.40)
