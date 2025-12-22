@@ -296,16 +296,15 @@ def calcular_delay(tentativa, error_msg):
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
 
-def processar_pagina_worker(job_data):
+def processar_pagina_worker(job_data, crop_ratio_override=None):
     """
     Processa uma única página de PDF usando OCR/AI (Gemini),
-    com validação de existência de páginas e fallback seguro.
+    com validação de existência de páginas, logs detalhados e fallback seguro.
     """
     pdf_bytes = job_data["bytes"]
     prompt = job_data["prompt"]
     name = job_data["name"]
     page_idx = job_data["page_idx"]
-
     texto_pdf_real = ""
 
     try:
@@ -325,40 +324,41 @@ def processar_pagina_worker(job_data):
                 "texto_real": texto_pdf_real
             }
 
-        # --- Extrair cabeçalho ---
+        # --- Extrair imagem da página (cabeçalho) ---
         try:
-            img_header = extrair_cabecalho_pagina(pdf_bytes, page_idx)
-        except Exception as e:
-            st.warning(f"⚠️ Erro ao extrair imagem do PDF {name}, página {page_idx+1}: {e}")
-            # fallback: imagem em branco 1x1
-            img_header = Image.new("RGB", (1, 1), (255, 255, 255))
-            buf = io.BytesIO()
-            img_header.save(buf, format="PNG")
-            buf.seek(0)
-            img_header = buf
+            images = convert_from_bytes(
+                pdf_bytes,
+                dpi=220,
+                first_page=page_idx + 1,
+                last_page=page_idx + 1
+            )
+            img = images[0]
+            w, h = img.size
 
-        img_bytes = img_header.getvalue()
+            # Crop adaptativo (opcional override)
+            crop_ratio = crop_ratio_override or (0.35 if h < 3500 else 0.40)
+            header = img.crop((0, 0, w, int(h * crop_ratio)))
+
+            buf = io.BytesIO()
+            header.save(buf, format="PNG", optimize=True)
+            buf.seek(0)
+            img_bytes = buf.getvalue()
+        except Exception as e_img:
+            st.warning(f"⚠️ Erro ao extrair imagem do PDF {name}, página {page_idx+1}: {e_img}")
+            img_bytes = Image.new("RGB", (1, 1), (255, 255, 255)).tobytes()
 
         # --- Cache ---
         cache_key = document_cache.get_cache_key(img_bytes, prompt)
         cached_result = document_cache.get(cache_key)
         if cached_result and job_data.get("use_cache", True):
-            return {
-                "status": "CACHE",
-                "dados": cached_result['dados'],
-                "tempo": cached_result['tempo'],
-                "provider": cached_result['provider'],
-                "name": name,
-                "page_idx": page_idx,
-                "pdf_bytes": pdf_bytes,
-                "texto_real": texto_pdf_real
-            }
+            return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
 
         # --- Chamada ao Gemini ---
-        # Nota: page_stream ou img_bytes pode ser usado dependendo da implementação
+        st.write(f"[DEBUG] Chamando Gemini para {name}, página {page_idx+1}, bytes={len(img_bytes)}")
         try:
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
-        except Exception as e:
+            st.write(f"[DEBUG] Retorno Gemini: ok={ok}, dados={dados}, provider={provider}")
+        except Exception as e_gem:
             return {
                 "status": "ERRO",
                 "dados": {"emitente": "", "numero_nota": "000", "cidade": ""},
@@ -366,10 +366,14 @@ def processar_pagina_worker(job_data):
                 "provider": "",
                 "name": name,
                 "page_idx": page_idx,
-                "error_msg": f"Erro Gemini: {e}",
+                "error_msg": f"Erro Gemini: {e_gem}",
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
             }
+
+        # --- Validação básica dos dados ---
+        if not dados or not isinstance(dados, dict):
+            dados = {"emitente": "", "numero_nota": "000", "cidade": ""}
 
         # --- Armazenar no cache se sucesso ---
         if ok and "error" not in dados:
