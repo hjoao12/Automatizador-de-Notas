@@ -323,6 +323,7 @@ def processar_pagina_gemini(prompt, image_bytes):
                 dados = json.loads(text)
                 return dados, True, elapsed, "Gemini 2.5"
             except json.JSONDecodeError:
+                print(f"\n[DEBUG] FALHA JSON: {response.text}\n") 
                 return {"error": "Falha ao decodificar JSON"}, False, elapsed, "Gemini 2.5"
         else:
             return {"error": "Resposta vazia da IA"}, False, elapsed, "Gemini 2.5"
@@ -421,8 +422,11 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         if not dados or not isinstance(dados, dict):
             dados = {"emitente": "", "numero_nota": "000", "cidade": ""}
 
-        # --- Armazenar no cache se sucesso ---
-        if ok and "error" not in dados:
+        # --- Armazenar no cache SOMENTE SE achou dados úteis ---
+        # Se for desconhecido, NÃO salva no cache, para tentar de novo no futuro
+        tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
+        
+        if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
             return {
                 "status": "OK",
@@ -434,19 +438,6 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
             }
-        else:
-            return {
-                "status": "ERRO",
-                "dados": dados,
-                "tempo": tempo,
-                "provider": provider,
-                "name": name,
-                "page_idx": page_idx,
-                "error_msg": dados.get("error", "Erro desconhecido"),
-                "pdf_bytes": pdf_bytes,
-                "texto_real": texto_pdf_real
-            }
-
     except Exception as e_outer:
         # Proteção final: nunca quebra o loop
         return {
@@ -536,6 +527,7 @@ if clear_session:
     st.rerun()
 
 if uploaded_files and process_btn:
+    document_cache.clear()
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
