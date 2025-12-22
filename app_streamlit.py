@@ -368,35 +368,18 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             }
 
         # --- Extrair imagem da página (INTEIRA) ---
-        # Bloco Try específico para captura de imagem
-        try:
-            img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx)
-            
-            if img_bytes is None:
-                # Retorna erro se falhar na conversão
-                return {
-                    "status": "ERRO",
-                    "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
-                    "tempo": 0,
-                    "provider": "System",
-                    "name": name,
-                    "page_idx": page_idx,
-                    "error_msg": "Falha ao converter PDF para Imagem",
-                    "pdf_bytes": pdf_bytes,
-                    "texto_real": texto_pdf_real
-                }
-
-        except Exception as e_img:
-            error_msg = f"Erro no PDF2IMAGE (Poppler instalado?): {e_img}"
-            print(error_msg)
-            return {
+        # AQUI ESTAVA O ERRO: Havia código sobrando aqui embaixo.
+        img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx)
+        
+        if img_bytes is None:
+             return {
                 "status": "ERRO",
                 "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
                 "tempo": 0,
                 "provider": "System",
                 "name": name,
                 "page_idx": page_idx,
-                "error_msg": error_msg,
+                "error_msg": "Falha ao converter PDF para Imagem",
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
             }
@@ -411,7 +394,8 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         st.write(f"[DEBUG] Chamando Gemini para {name}, página {page_idx+1}, bytes={len(img_bytes)}")
         try:
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
-            st.write(f"[DEBUG] Retorno Gemini: ok={ok}, dados={dados}, provider={provider}")
+            # Log no terminal para vermos o que a IA está respondendo
+            print(f"RESPOSTA IA ({name}): {dados}") 
         except Exception as e_gem:
             return {
                 "status": "ERRO",
@@ -432,7 +416,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         # --- Armazenar no cache SOMENTE SE achou dados úteis ---
         tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
         
-        # Monta o resultado final
+        # Resultado Final
         resultado_final = {
             "status": "OK" if ok else "ERRO",
             "dados": dados,
@@ -444,13 +428,14 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             "texto_real": texto_pdf_real
         }
 
-        # Só salva no cache se tiver dados bons
+        # Só salva no cache se tiver sucesso E dados
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         
         return resultado_final
 
     except Exception as e_outer:
+        print(f"ERRO CRITICO WORKER: {e_outer}") # Isso vai aparecer no seu terminal
         return {
             "status": "ERRO",
             "dados": {"emitente": "", "numero_nota": "000", "cidade": ""},
@@ -458,7 +443,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             "provider": "",
             "name": name,
             "page_idx": page_idx,
-            "error_msg": f"Erro crítico inesperado: {e_outer}",
+            "error_msg": f"Erro crítico: {e_outer}",
             "pdf_bytes": pdf_bytes,
             "texto_real": texto_pdf_real
         }
@@ -614,7 +599,13 @@ Retorne APENAS um JSON válido com estas chaves exatas:
                 
                 dados = validar_e_corrigir_dados(dados_iniciais, result.get("texto_real", ""))
                 
-                status_lbl = "CACHE" if result["status"] == "CACHE" else "OK"
+                if result["status"] == "CACHE":
+                    status_lbl = "CACHE"
+                elif result["status"] == "OK":
+                    status_lbl = "OK"
+                else:
+                    status_lbl = "ERRO"
+                    
                 css_class = "success-log" if result["status"] == "OK" else "warning-log"
                 
                 log_info = f"{dados.get('numero_nota')} | {dados.get('emitente')[:20]}"
