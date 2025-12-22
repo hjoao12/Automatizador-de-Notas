@@ -380,9 +380,8 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             buf.seek(0)
             img_bytes = buf.getvalue()
         except Exception as e_img:
-            # ERRO CRÍTICO: Se falhar aqui, não adianta chamar a IA com imagem em branco
             error_msg = f"Erro no PDF2IMAGE (Poppler instalado?): {e_img}"
-            print(error_msg) # Ver no terminal
+            print(error_msg)
             return {
                 "status": "ERRO",
                 "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
@@ -394,6 +393,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
             }
+
         # --- Cache ---
         cache_key = document_cache.get_cache_key(img_bytes, prompt)
         cached_result = document_cache.get(cache_key)
@@ -423,23 +423,28 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             dados = {"emitente": "", "numero_nota": "000", "cidade": ""}
 
         # --- Armazenar no cache SOMENTE SE achou dados úteis ---
-        # Se for desconhecido, NÃO salva no cache, para tentar de novo no futuro
         tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
         
+        # CORREÇÃO AQUI: Montamos o resultado padrão
+        resultado_final = {
+            "status": "OK" if ok else "ERRO",
+            "dados": dados,
+            "tempo": tempo,
+            "provider": provider,
+            "name": name,
+            "page_idx": page_idx,
+            "pdf_bytes": pdf_bytes,
+            "texto_real": texto_pdf_real
+        }
+
+        # Só salva no cache se tiver dados bons, mas retorna SEMPRE
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
-            return {
-                "status": "OK",
-                "dados": dados,
-                "tempo": tempo,
-                "provider": provider,
-                "name": name,
-                "page_idx": page_idx,
-                "pdf_bytes": pdf_bytes,
-                "texto_real": texto_pdf_real
-            }
+        
+        # OBRIGATÓRIO: Retornar o resultado mesmo que não tenha sido salvo no cache
+        return resultado_final
+
     except Exception as e_outer:
-        # Proteção final: nunca quebra o loop
         return {
             "status": "ERRO",
             "dados": {"emitente": "", "numero_nota": "000", "cidade": ""},
@@ -451,7 +456,6 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             "pdf_bytes": pdf_bytes,
             "texto_real": texto_pdf_real
         }
-
 
 # =====================================================================
 # UI & MAIN FLOW
