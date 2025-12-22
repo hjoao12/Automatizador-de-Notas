@@ -295,6 +295,41 @@ def calcular_delay(tentativa, error_msg):
         except: pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
+def processar_pagina_gemini(prompt, image_bytes):
+    start_time = time.time()
+    try:
+        # 1. Prepara a imagem
+        image = Image.open(io.BytesIO(image_bytes))
+        
+        # 2. Configurações de geração para forçar JSON
+        generation_config = genai.types.GenerationConfig(
+            temperature=0.1,
+            response_mime_type="application/json"
+        )
+        
+        # 3. Chamada à API
+        response = model.generate_content(
+            [prompt, image],
+            generation_config=generation_config
+        )
+        
+        elapsed = time.time() - start_time
+        
+        # 4. Tratamento da resposta
+        if response.text:
+            try:
+                # Limpeza básica caso venha com markdown ```json ... ```
+                text = response.text.replace("```json", "").replace("```", "")
+                dados = json.loads(text)
+                return dados, True, elapsed, "Gemini 2.5"
+            except json.JSONDecodeError:
+                return {"error": "Falha ao decodificar JSON"}, False, elapsed, "Gemini 2.5"
+        else:
+            return {"error": "Resposta vazia da IA"}, False, elapsed, "Gemini 2.5"
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        return {"error": f"Erro API: {str(e)}"}, False, elapsed, "Gemini 2.5"
 
 def processar_pagina_worker(job_data, crop_ratio_override=None):
     """
@@ -344,9 +379,20 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             buf.seek(0)
             img_bytes = buf.getvalue()
         except Exception as e_img:
-            st.warning(f"⚠️ Erro ao extrair imagem do PDF {name}, página {page_idx+1}: {e_img}")
-            img_bytes = Image.new("RGB", (1, 1), (255, 255, 255)).tobytes()
-
+            # ERRO CRÍTICO: Se falhar aqui, não adianta chamar a IA com imagem em branco
+            error_msg = f"Erro no PDF2IMAGE (Poppler instalado?): {e_img}"
+            print(error_msg) # Ver no terminal
+            return {
+                "status": "ERRO",
+                "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
+                "tempo": 0,
+                "provider": "System",
+                "name": name,
+                "page_idx": page_idx,
+                "error_msg": error_msg,
+                "pdf_bytes": pdf_bytes,
+                "texto_real": texto_pdf_real
+            }
         # --- Cache ---
         cache_key = document_cache.get_cache_key(img_bytes, prompt)
         cached_result = document_cache.get(cache_key)
