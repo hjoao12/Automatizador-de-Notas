@@ -295,100 +295,122 @@ def calcular_delay(tentativa, error_msg):
         except: pass
     return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
 
+
 def processar_pagina_worker(job_data):
+    """
+    Processa uma única página de PDF usando OCR/AI (Gemini),
+    com validação de existência de páginas e fallback seguro.
+    """
     pdf_bytes = job_data["bytes"]
     prompt = job_data["prompt"]
     name = job_data["name"]
     page_idx = job_data["page_idx"]
-    
+
     texto_pdf_real = ""
 
-    # Cria PDF de 1 página para o OCR
-    writer = PdfWriter()
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    writer.add_page(reader.pages[page_idx])
-    b_page = io.BytesIO()
-    writer.write(b_page)
-    b_page.seek(0)
-    pdf_uma_pagina_bytes = b_page.getvalue()
+    try:
+        # --- Validação do PDF ---
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        total_pages = len(reader.pages)
+        if page_idx >= total_pages:
+            return {
+                "status": "ERRO",
+                "dados": {"emitente": "", "numero_nota": "000", "cidade": ""},
+                "tempo": 0,
+                "provider": "",
+                "name": name,
+                "page_idx": page_idx,
+                "error_msg": f"Página {page_idx+1} inexistente (total {total_pages})",
+                "pdf_bytes": pdf_bytes,
+                "texto_real": texto_pdf_real
+            }
 
-    # Extrai imagem do cabeçalho
-    img_header = extrair_cabecalho_pagina(pdf_uma_pagina_bytes, 0)
-    img_bytes = img_header.getvalue()
+        # --- Extrair cabeçalho ---
+        try:
+            img_header = extrair_cabecalho_pagina(pdf_bytes, page_idx)
+        except Exception as e:
+            st.warning(f"⚠️ Erro ao extrair imagem do PDF {name}, página {page_idx+1}: {e}")
+            # fallback: imagem em branco 1x1
+            img_header = Image.new("RGB", (1, 1), (255, 255, 255))
+            buf = io.BytesIO()
+            img_header.save(buf, format="PNG")
+            buf.seek(0)
+            img_header = buf
 
-    cache_key = document_cache.get_cache_key(img_bytes, prompt)
-    cached_result = document_cache.get(cache_key)
+        img_bytes = img_header.getvalue()
 
-    if cached_result and job_data["use_cache"]:
+        # --- Cache ---
+        cache_key = document_cache.get_cache_key(img_bytes, prompt)
+        cached_result = document_cache.get(cache_key)
+        if cached_result and job_data.get("use_cache", True):
+            return {
+                "status": "CACHE",
+                "dados": cached_result['dados'],
+                "tempo": cached_result['tempo'],
+                "provider": cached_result['provider'],
+                "name": name,
+                "page_idx": page_idx,
+                "pdf_bytes": pdf_bytes,
+                "texto_real": texto_pdf_real
+            }
+
+        # --- Chamada ao Gemini ---
+        # Nota: page_stream ou img_bytes pode ser usado dependendo da implementação
+        try:
+            dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
+        except Exception as e:
+            return {
+                "status": "ERRO",
+                "dados": {"emitente": "", "numero_nota": "000", "cidade": ""},
+                "tempo": 0,
+                "provider": "",
+                "name": name,
+                "page_idx": page_idx,
+                "error_msg": f"Erro Gemini: {e}",
+                "pdf_bytes": pdf_bytes,
+                "texto_real": texto_pdf_real
+            }
+
+        # --- Armazenar no cache se sucesso ---
+        if ok and "error" not in dados:
+            document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
+            return {
+                "status": "OK",
+                "dados": dados,
+                "tempo": tempo,
+                "provider": provider,
+                "name": name,
+                "page_idx": page_idx,
+                "pdf_bytes": pdf_bytes,
+                "texto_real": texto_pdf_real
+            }
+        else:
+            return {
+                "status": "ERRO",
+                "dados": dados,
+                "tempo": tempo,
+                "provider": provider,
+                "name": name,
+                "page_idx": page_idx,
+                "error_msg": dados.get("error", "Erro desconhecido"),
+                "pdf_bytes": pdf_bytes,
+                "texto_real": texto_pdf_real
+            }
+
+    except Exception as e_outer:
+        # Proteção final: nunca quebra o loop
         return {
-            "status": "CACHE",
-            "dados": cached_result['dados'],
-            "tempo": cached_result['tempo'],
-            "provider": cached_result['provider'],
+            "status": "ERRO",
+            "dados": {"emitente": "", "numero_nota": "000", "cidade": ""},
+            "tempo": 0,
+            "provider": "",
             "name": name,
             "page_idx": page_idx,
+            "error_msg": f"Erro crítico inesperado: {e_outer}",
             "pdf_bytes": pdf_bytes,
-            "texto_real": ""
-        }
-
-    # Chamada ao Gemini
-    dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
-    
-    if ok and "error" not in dados:
-        document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
-        return {
-            "status": "OK", "dados": dados, "tempo": tempo, "provider": provider,
-            "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes,
             "texto_real": texto_pdf_real
         }
-    else:
-        return {
-            "status": "ERRO", "dados": dados, "tempo": tempo, "provider": provider,
-            "name": name, "page_idx": page_idx, "error_msg": dados.get("error", "Erro"),
-            "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real
-        }
 
-def processar_pagina_worker(job_data):
-    pdf_bytes = job_data["bytes"]
-    prompt = job_data["prompt"]
-    name = job_data["name"]
-    page_idx = job_data["page_idx"]
-    
-    texto_pdf_real = ""
-
-    img_header = extrair_cabecalho_pagina(pdf_bytes, page_idx)
-    img_bytes = img_header.getvalue()
-
-    cache_key = document_cache.get_cache_key(img_bytes, prompt)
-    cached_result = document_cache.get(cache_key)
-
-    if cached_result and job_data["use_cache"]:
-        return {
-            "status": "CACHE",
-            "dados": cached_result['dados'],
-            "tempo": cached_result['tempo'],
-            "provider": cached_result['provider'],
-            "name": name,
-            "page_idx": page_idx,
-            "pdf_bytes": pdf_bytes,
-            "texto_real": ""
-        }
-
-    dados, ok, tempo, provider = processar_pagina_gemini(prompt, page_stream)
-    
-    if ok and "error" not in dados:
-        document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
-        return {
-            "status": "OK", "dados": dados, "tempo": tempo, "provider": provider,
-            "name": name, "page_idx": page_idx, "pdf_bytes": pdf_bytes,
-            "texto_real": texto_pdf_real
-        }
-    else:
-        return {
-            "status": "ERRO", "dados": dados, "tempo": tempo, "provider": provider,
-            "name": name, "page_idx": page_idx, "error_msg": dados.get("error", "Erro"),
-            "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real
-        }
 
 # =====================================================================
 # UI & MAIN FLOW
