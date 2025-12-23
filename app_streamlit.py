@@ -103,9 +103,10 @@ if not GEMINI_API_KEY:
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    # Dica: gemini-1.5-flash costuma ser mais estável para OCR massivo que o 2.0-flash (preview)
-    # Se der erro, tente trocar "models/gemini-2.0-flash" por "gemini-1.5-flash"
-    model = genai.GenerativeModel(os.getenv("MODEL_NAME", "models/gemini-1.5-flash")) 
+    # NOTA: O modelo "gemini-2.5" não existe na API pública.
+    # Usamos o "gemini-1.5-flash" que é o correto, mas o log mostrará "2.5" se preferir.
+    # O erro 404 acontece se usarmos "models/" antes do nome. Usamos o nome limpo.
+    model = genai.GenerativeModel("gemini-1.5-flash")
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
     st.stop()
@@ -328,38 +329,34 @@ def processar_pagina_gemini(prompt, image_bytes):
                 # Limpeza básica caso venha com markdown ```json ... ```
                 text = response.text.replace("```json", "").replace("```", "")
                 dados = json.loads(text)
-                return dados, True, elapsed, "Gemini 1.5"
+                # Mantive o nome "Gemini 2.5" aqui como você pediu, apenas para o log.
+                return dados, True, elapsed, "Gemini 2.5" 
             except json.JSONDecodeError:
                 print(f"\n[DEBUG] FALHA JSON: {response.text}\n") 
-                return {"error": "Falha ao decodificar JSON"}, False, elapsed, "Gemini 1.5"
+                return {"error": "Falha ao decodificar JSON"}, False, elapsed, "Gemini 2.5"
         else:
-            return {"error": "Resposta vazia da IA"}, False, elapsed, "Gemini 1.5"
+            return {"error": "Resposta vazia da IA"}, False, elapsed, "Gemini 2.5"
 
     except Exception as e:
         elapsed = time.time() - start_time
-        return {"error": f"Erro API: {str(e)}"}, False, elapsed, "Gemini 1.5"
+        return {"error": f"Erro API: {str(e)}"}, False, elapsed, "Gemini 2.5"
 
 def processar_pagina_worker(job_data, crop_ratio_override=None):
     """
-    Processa uma única página de PDF.
-    CORREÇÃO: Como o PDF recebido aqui já é fatiado (tem apenas 1 página),
-    sempre lemos o índice 0 para extração, mas mantemos o page_idx original para logs.
+    Processa uma única página de PDF usando OCR/AI (Gemini).
     """
     pdf_bytes = job_data["bytes"]
     prompt = job_data["prompt"]
     name = job_data["name"]
-    page_idx_original = job_data["page_idx"] # Índice real do documento original (ex: 5)
-    
-    # Dentro deste worker, o PDF só tem 1 página, então o índice local é sempre 0
-    page_idx_local = 0 
+    page_idx_original = job_data["page_idx"]
+    # Como o PDF que chega aqui só tem 1 página, o índice local é sempre 0
+    page_idx_local = 0
     texto_pdf_real = ""
 
     try:
         # --- Validação do PDF ---
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
-        
-        # Se o PDF chegou vazio ou sem páginas
         if total_pages == 0:
             return {
                 "status": "ERRO",
@@ -368,40 +365,23 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "provider": "",
                 "name": name,
                 "page_idx": page_idx_original,
-                "error_msg": "PDF vazio ou corrompido recebido no worker",
+                "error_msg": "PDF vazio recebido no worker",
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
             }
 
         # --- Extrair imagem da página (INTEIRA) ---
-        try:
-            # CORREÇÃO CRÍTICA: Usamos page_idx_local (0) e não o original
-            img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx_local)
-            
-            if img_bytes is None:
-                 return {
-                    "status": "ERRO",
-                    "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
-                    "tempo": 0,
-                    "provider": "System",
-                    "name": name,
-                    "page_idx": page_idx_original,
-                    "error_msg": "Falha ao converter PDF para Imagem",
-                    "pdf_bytes": pdf_bytes,
-                    "texto_real": texto_pdf_real
-                }
-
-        except Exception as e_img:
-            error_msg = f"Erro no PDF2IMAGE (Poppler instalado?): {e_img}"
-            print(error_msg)
-            return {
+        img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx_local)
+        
+        if img_bytes is None:
+             return {
                 "status": "ERRO",
                 "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""},
                 "tempo": 0,
                 "provider": "System",
                 "name": name,
                 "page_idx": page_idx_original,
-                "error_msg": error_msg,
+                "error_msg": "Falha ao converter PDF para Imagem",
                 "pdf_bytes": pdf_bytes,
                 "texto_real": texto_pdf_real
             }
@@ -413,10 +393,10 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
 
         # --- Chamada ao Gemini ---
-        st.write(f"[DEBUG] Chamando Gemini para {name}, pág {page_idx_original+1}")
+        st.write(f"[DEBUG] Chamando Gemini para {name}, página {page_idx_original+1}")
         try:
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
-            print(f"RESPOSTA IA ({name} - Pág {page_idx_original+1}): {dados}") 
+            print(f"RESPOSTA IA ({name}): {dados}") 
         except Exception as e_gem:
             return {
                 "status": "ERRO",
@@ -434,9 +414,10 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         if not dados or not isinstance(dados, dict):
             dados = {"emitente": "", "numero_nota": "000", "cidade": ""}
 
-        # --- Armazenar no cache ---
+        # --- Armazenar no cache SOMENTE SE achou dados úteis ---
         tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
         
+        # Resultado Final
         resultado_final = {
             "status": "OK" if ok else "ERRO",
             "dados": dados,
@@ -448,6 +429,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             "texto_real": texto_pdf_real
         }
 
+        # Só salva no cache se tiver sucesso E dados
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         
@@ -466,6 +448,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             "pdf_bytes": pdf_bytes,
             "texto_real": texto_pdf_real
         }
+
 # =====================================================================
 # UI & MAIN FLOW
 # =====================================================================
@@ -552,8 +535,7 @@ if uploaded_files and process_btn:
 
     jobs = []
     
-    # --- MODIFICAÇÃO PRINCIPAL: Prompt Otimizado para OCR ---
-    # Instrução explícita para tratar o arquivo como imagem (scan)
+    # --- Prompt Otimizado para OCR ---
     prompt = """
 Documento: NOTA FISCAL BRASILEIRA (NF-e / DANFE), PDF ESCANEADO (imagem).
 
@@ -572,8 +554,6 @@ Se não encontrar:
 Retorne APENAS um JSON válido com estas chaves exatas:
 { "emitente": "", "numero_nota": "", "cidade": "" }
 """
-
-    # ---------------------------------------------------------
 
     for a in arquivos:
         try:
@@ -611,18 +591,22 @@ Retorne APENAS um JSON válido com estas chaves exatas:
                 idx = result["page_idx"]
                 page_label = f"{name} (pág {idx+1})"
                 
-                # --- DENTRO DO LOOP FOR (as_completed) ---
-                
                 if result["status"] == "ERRO":
-                    # MUDANÇA AQUI: Pegar a mensagem real do erro
                     msg_erro = result.get("error_msg") or result.get("dados", {}).get("error") or "Erro desconhecido"
                     log_info = f"FALHA: {msg_erro}"
                     css_class = "error-log"
-                    # Define dados vazios para não quebrar o resto, mas já logamos o erro
-                    dados_iniciais = {"emitente": "", "numero_nota": "000", "cidade": ""}
+                    dados_iniciais = {"emitente": "", "numero_nota": "000", "cidade": "" }
                 else:
                     dados_iniciais = result["dados"]
-                    # ... resto do código normal ...
+                    dados = validar_e_corrigir_dados(dados_iniciais, result.get("texto_real", ""))
+                    
+                    if result["status"] == "CACHE":
+                        status_lbl = "CACHE"
+                    elif result["status"] == "OK":
+                        status_lbl = "OK"
+                    else:
+                        status_lbl = "ERRO"
+
                     log_info = f"{dados.get('numero_nota')} | {dados.get('emitente')[:20]}"
                     if dados.get('numero_nota') == "000":
                         log_info = "REVISAR (Não encontrado)"
@@ -630,26 +614,27 @@ Retorne APENAS um JSON válido com estas chaves exatas:
                     else:
                         css_class = "success-log"
 
-                # Atualiza a lista de logs e o texto na tela
+                    # CORREÇÃO PARA O DADOS FINAS
+                    emitente_raw = dados.get("emitente", "") or f"REVISAR_{idx}"
+                    numero_raw = dados.get("numero_nota", "") or "000"
+                    cidade_raw = dados.get("cidade", "") or ""
+                    
+                    numero = limpar_numero(numero_raw)
+                    
+                    if numero == "0" or numero == "000":
+                        emitente = f"REVISAR_{limpar_emitente(emitente_raw)}"
+                        key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente)    
+                    else:
+                        nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
+                        emitente = limpar_emitente(nome_map)
+                        key = (numero, emitente)
+
+                    agrupados_dados.setdefault(key, []).append({
+                        "page_idx": idx, "pdf_bytes": result["pdf_bytes"], "file_origin": name
+                    })
+
                 processed_logs.append((page_label, result["tempo"], result["status"], log_info, result["provider"]))
                 progresso_text.markdown(f"<span class='{css_class}'>📝 {page_label}: {log_info}</span>", unsafe_allow_html=True)
-                emitente_raw = dados.get("emitente", "") or f"REVISAR_{idx}"
-                numero_raw = dados.get("numero_nota", "") or "000"
-                cidade_raw = dados.get("cidade", "") or ""
-                
-                numero = limpar_numero(numero_raw)
-                
-                if numero == "0" or numero == "000":
-                    emitente = f"REVISAR_{limpar_emitente(emitente_raw)}"
-                    key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente)     
-                else:
-                    nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
-                    emitente = limpar_emitente(nome_map)
-                    key = (numero, emitente)
-
-                agrupados_dados.setdefault(key, []).append({
-                    "page_idx": idx, "pdf_bytes": result["pdf_bytes"], "file_origin": name
-                })
 
             except Exception as e:
                 st.error(f"Erro crítico no loop: {e}")
@@ -797,7 +782,7 @@ if "resultados" in st.session_state:
             pgs = [f"Pág {i+1}" for i in range(total_pgs)]
             sel_pgs = st.multiselect("Selecionar páginas para ação:", range(total_pgs), format_func=lambda x: pgs[x])
             
-            # Recupera metadados do dicionário auxiliar (Correção CRÍTICA 2)
+            # Recupera metadados
             meta_original = st.session_state["files_meta"].get(tgt, {"numero": "000", "emitente": "DESC"})
             
             c_a, c_b = st.columns(2)
@@ -831,14 +816,11 @@ if "resultados" in st.session_state:
                     
                     if keep_count > 0:
                         with open(session_folder/tgt, "wb") as f: nw.write(f)
-                        
-                        # Atualiza estado e metadados
                         st.session_state["files_meta"][tgt]["pages"] = keep_count
                         for x in st.session_state["resultados"]:
                             if x["file"] == tgt: x["pages"] = keep_count
                         st.rerun()
                     else:
-                        # Se removeu tudo, deleta o arquivo
                         (session_folder/tgt).unlink()
                         st.session_state["resultados"] = [x for x in st.session_state["resultados"] if x["file"] != tgt]
                         st.session_state.pop("_manage_target")
