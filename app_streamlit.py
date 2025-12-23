@@ -1,3 +1,4 @@
+import streamlit as st
 import os
 import io
 import time
@@ -12,13 +13,9 @@ import pickle
 import base64
 import gc
 import pandas as pd
-from supabase import create_client, Client
-from streamlit_pdf_viewer import pdf_viewer
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 import google.generativeai as genai
-from google.api_core.exceptions import ResourceExhausted
-import streamlit as st
 from pdf2image import convert_from_bytes
 from PIL import Image
 from dotenv import load_dotenv
@@ -27,12 +24,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
 # =====================================================================
-load_dotenv()
 st.set_page_config(
     page_title="Automatizador de Notas Fiscais",
     page_icon="📄",
     layout="wide"
 )
+load_dotenv()
 
 # ======= CSS Corporativo Claro =======
 st.markdown("""
@@ -101,81 +98,31 @@ if not GEMINI_API_KEY:
     st.error("❌ Chave GOOGLE_API_KEY não encontrada (.env ou secrets).")
     st.stop()
 
+# Inicializa variável global
+model = None
+
 try:
     genai.configure(api_key=GEMINI_API_KEY)
     
     # --- MODELO DEFINIDO PARA 2.5 (SEM FALLBACK) ---
-    # Usará exatamente o nome fornecido. Se falhar, o app para com erro.
     model_name_target = os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
     model = genai.GenerativeModel(model_name_target)
 
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini ({model_name_target}): {str(e)}")
-    st.stop()
+    # Não paramos o app aqui para permitir que a interface carregue, mas vai falhar ao rodar.
 
 # =====================================================================
-# CONFIGURAÇÕES GERAIS
+# FUNÇÕES AUXILIARES
 # =====================================================================
-TEMP_FOLDER = Path("./temp")
-os.makedirs(TEMP_FOLDER, exist_ok=True)
-
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
-MIN_RETRY_DELAY = int(os.getenv("MIN_RETRY_DELAY", "2"))
-MAX_RETRY_DELAY = int(os.getenv("MAX_RETRY_DELAY", "15"))
-
-# =====================================================================
-# GESTÃO DE PADRÕES (VIA SUPABASE)
-# =====================================================================
-@st.cache_resource
-def init_supabase():
-    url = None
-    key = None
-    
-    try:
-        url = st.secrets["supabase"]["url"]
-        key = st.secrets["supabase"]["key"]
-    except: pass
-
-    if not url:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_KEY")
-
-    if url and key:
-        return create_client(url, key)
-    return None
-
-supabase = init_supabase()
-
 def get_patterns_db():
-    if not supabase: return {}
-    try:
-        response = supabase.table("invoice_patterns").select("*").execute()
-        return {item["origin"]: item["target"] for item in response.data}
-    except Exception as e:
-        print(f"Erro ao ler banco: {e}")
-        return {}
+    return st.session_state.get("db_patterns", {})
 
 def sync_patterns_db(new_dict):
-    if not supabase: return False
-    try:
-        current_data = supabase.table("invoice_patterns").select("origin").execute()
-        db_keys = {row['origin'] for row in current_data.data}
-        new_keys = set(new_dict.keys())
-
-        to_delete = list(db_keys - new_keys)
-        if to_delete:
-            supabase.table("invoice_patterns").delete().in_("origin", to_delete).execute()
-
-        upsert_data = [{"origin": k, "target": v} for k, v in new_dict.items()]
-        if upsert_data:
-            supabase.table("invoice_patterns").upsert(upsert_data, on_conflict="origin").execute()
-        return True
-    except Exception as e:
-        st.error(f"Erro ao salvar: {e}")
-        return False
+    return True
 
 if "db_patterns" not in st.session_state:
-    st.session_state["db_patterns"] = get_patterns_db()
+    st.session_state["db_patterns"] = {}
 
 def _normalizar_texto(s: str) -> str:
     if not s: return ""
@@ -214,7 +161,6 @@ def limpar_para_nome_arquivo(texto):
     texto = unicodedata.normalize("NFKD", texto).encode("ASCII", "ignore").decode("ASCII")
     return texto.strip()[:60]
 
-# --- LÓGICA HÍBRIDA: AI + REGEX NO TEXTO REAL ---
 def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     if not isinstance(dados, dict):
         if isinstance(dados, list) and len(dados) > 0 and isinstance(dados[0], dict):
@@ -253,15 +199,10 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     dados['numero_nota'] = final_num.lstrip('0') if final_num else "000"
 
     emitente = dados.get('emitente', '').strip()
+    if not emitente: dados['emitente'] = "EMITENTE_DESCONHECIDO"
+    else: dados['emitente'] = emitente
 
-    if not emitente:
-        dados['emitente'] = "EMITENTE_DESCONHECIDO"
-    else:
-        dados['emitente'] = emitente
-
-    if 'cidade' not in dados:
-        dados['cidade'] = ""
-    
+    if 'cidade' not in dados: dados['cidade'] = ""
     return dados
 
 def extrair_pagina_inteira(pdf_bytes, page_idx, dpi=200):
@@ -273,7 +214,6 @@ def extrair_pagina_inteira(pdf_bytes, page_idx, dpi=200):
             last_page=page_idx + 1
         )
         img = images[0]
-        
         if img.width > 2000:
             ratio = 2000 / float(img.width)
             new_height = int(float(img.height) * ratio)
@@ -288,22 +228,16 @@ def extrair_pagina_inteira(pdf_bytes, page_idx, dpi=200):
         return None
 
 # =====================================================================
-# PROCESSAMENTO GEMINI
+# PROCESSAMENTO GEMINI (COM LEITURA INTELIGENTE DE COTA)
 # =====================================================================
-def calcular_delay(tentativa, error_msg):
-    if "retry in" in error_msg.lower():
-        try:
-            val = float(re.search(r"retry in (\d+\.?\d*)s", error_msg.lower()).group(1))
-            return min(val + 1, MAX_RETRY_DELAY)
-        except: pass
-    return min(MIN_RETRY_DELAY * (tentativa + 1), MAX_RETRY_DELAY)
-
 def processar_pagina_gemini(prompt, image_bytes):
+    if model is None:
+        return {"error": "Modelo Gemini não configurado"}, False, 0, "None"
+
     start_time = time.time()
     
-    # Configuração de retentativas inteligentes
-    max_retries = 5  # Aumentamos para 5 tentativas
-    base_delay = 5   # Espera mínima inicial
+    max_retries = 5
+    base_delay = 5
     
     for tentativa in range(max_retries):
         try:
@@ -333,24 +267,23 @@ def processar_pagina_gemini(prompt, image_bytes):
         except Exception as e:
             erro_str = str(e)
             
-            # --- LÓGICA INTELIGENTE DE ESPERA ---
+            # --- LÓGICA DE ESPERA INTELIGENTE (429) ---
             if "429" in erro_str or "Quota exceeded" in erro_str:
-                # 1. Tenta achar o tempo exato que o Google mandou esperar
+                # Tenta extrair o tempo exato pedido pelo Google
                 match_seconds = re.search(r"retry_delay.*?\n?\s*seconds:\s*(\d+)", erro_str, re.DOTALL | re.IGNORECASE)
                 
-                wait_time = base_delay * (tentativa + 1) # Fallback padrão
+                wait_time = base_delay * (tentativa + 1)
                 
                 if match_seconds:
                     exact_seconds = int(match_seconds.group(1))
-                    wait_time = exact_seconds + 2 # Espera o tempo pedido + 2s de segurança
-                    print(f"⏳ Cota cheia. O Google pediu para esperar {exact_seconds}s. Pausando por {wait_time}s...")
+                    wait_time = exact_seconds + 2 # +2s de margem de segurança
+                    print(f"⏳ Cota cheia. Esperando {exact_seconds}s (+2s) conforme API...")
                 else:
-                    print(f"⚠️ Cota cheia (tempo indefinido). Pausando por {wait_time}s...")
+                    print(f"⚠️ Cota cheia. Esperando {wait_time}s (estimado)...")
                 
                 time.sleep(wait_time)
-                continue # Tenta de novo
+                continue # Tenta de novo no loop
             
-            # Se for outro erro que não seja cota, desiste logo
             elapsed = time.time() - start_time
             return {"error": f"Erro API: {erro_str}"}, False, elapsed, "Gemini 2.5"
             
@@ -364,9 +297,12 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
     prompt = job_data["prompt"]
     name = job_data["name"]
     page_idx_original = job_data["page_idx"]
-    # Sempre índice 0, pois o PDF recebido aqui tem apenas 1 página
+    # PDF fatiado = índice sempre 0
     page_idx_local = 0
     texto_pdf_real = ""
+
+    # Limpeza preventiva de memória
+    gc.collect()
 
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -384,7 +320,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "texto_real": texto_pdf_real
             }
 
-        # --- Extrair imagem da página (INTEIRA) usando índice 0 ---
+        # --- Extrair imagem (INTEIRA) ---
         img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx_local)
         
         if img_bytes is None:
@@ -588,11 +524,9 @@ Retorne APENAS um JSON válido com estas chaves exatas:
     start_all = time.time()
     
     # -----------------------------------------------------------
-    # CONFIGURAÇÃO DE VELOCIDADE
+    # CONFIGURAÇÃO DE VELOCIDADE (SEGURA)
     # -----------------------------------------------------------
-    # Reduzi para 2 para respeitar o plano gratuito e funcionar com
-    # a lógica de retentativa inteligente (sem estourar demais).
-    MAX_WORKERS = 2 
+    MAX_WORKERS = 2  # Usar 2 é o limite seguro. 4 ESTOURA MEMÓRIA.
     total_jobs = len(jobs) if jobs else 1
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
