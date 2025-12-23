@@ -103,12 +103,14 @@ if not GEMINI_API_KEY:
 
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    # NOTA: O modelo "gemini-2.5" não existe na API pública.
-    # Usamos o "gemini-1.5-flash" que é o correto, mas o log mostrará "2.5" se preferir.
-    # O erro 404 acontece se usarmos "models/" antes do nome. Usamos o nome limpo.
-    model = genai.GenerativeModel("gemini-2.5-flash")
+    
+    # --- MODELO DEFINIDO PARA 2.5 (SEM FALLBACK) ---
+    # Usará exatamente o nome fornecido. Se falhar, o app para com erro.
+    model_name_target = os.getenv("MODEL_NAME", "models/gemini-2.5-flash")
+    model = genai.GenerativeModel(model_name_target)
+
 except Exception as e:
-    st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
+    st.error(f"❌ Erro ao configurar Gemini ({model_name_target}): {str(e)}")
     st.stop()
 
 # =====================================================================
@@ -233,7 +235,6 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     raw_num = dados.get('numero_nota', '')
     numeros_limpos = re.sub(r'[^\d]', '', raw_num)
 
-    # Se a IA falhou no número E temos texto real (não escaneado), tentamos regex
     if (not numeros_limpos or int(numeros_limpos) == 0) and texto_pdf_real:
         padroes_resgate = [
             r"N[°ºo]\s*([0-9\.]+)",
@@ -258,7 +259,6 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
     else:
         dados['emitente'] = emitente
 
-
     if 'cidade' not in dados:
         dados['cidade'] = ""
     
@@ -274,15 +274,10 @@ def extrair_pagina_inteira(pdf_bytes, page_idx, dpi=200):
         )
         img = images[0]
         
-        # OTIMIZAÇÃO: Redimensionar se for muito grande para não estourar payload
-        # Mantendo a proporção, limitamos a largura a 2000px (suficiente para OCR)
         if img.width > 2000:
             ratio = 2000 / float(img.width)
             new_height = int(float(img.height) * ratio)
             img = img.resize((2000, new_height), Image.Resampling.LANCZOS)
-
-        # NÃO FAZEMOS MAIS O CROP (header = img.crop...)
-        # Enviamos a imagem inteira para a IA achar o emitente onde ele estiver.
 
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85, optimize=True)
@@ -306,16 +301,12 @@ def calcular_delay(tentativa, error_msg):
 def processar_pagina_gemini(prompt, image_bytes):
     start_time = time.time()
     try:
-        # 1. Prepara a imagem
         image = Image.open(io.BytesIO(image_bytes))
-        
-        # 2. Configurações de geração para forçar JSON
         generation_config = genai.types.GenerationConfig(
             temperature=0.1,
             response_mime_type="application/json"
         )
         
-        # 3. Chamada à API
         response = model.generate_content(
             [prompt, image],
             generation_config=generation_config
@@ -323,13 +314,10 @@ def processar_pagina_gemini(prompt, image_bytes):
         
         elapsed = time.time() - start_time
         
-        # 4. Tratamento da resposta
         if response.text:
             try:
-                # Limpeza básica caso venha com markdown ```json ... ```
                 text = response.text.replace("```json", "").replace("```", "")
                 dados = json.loads(text)
-                # Mantive o nome "Gemini 2.5" aqui como você pediu, apenas para o log.
                 return dados, True, elapsed, "Gemini 2.5" 
             except json.JSONDecodeError:
                 print(f"\n[DEBUG] FALHA JSON: {response.text}\n") 
@@ -343,18 +331,17 @@ def processar_pagina_gemini(prompt, image_bytes):
 
 def processar_pagina_worker(job_data, crop_ratio_override=None):
     """
-    Processa uma única página de PDF usando OCR/AI (Gemini).
+    Processa uma única página de PDF.
     """
     pdf_bytes = job_data["bytes"]
     prompt = job_data["prompt"]
     name = job_data["name"]
     page_idx_original = job_data["page_idx"]
-    # Como o PDF que chega aqui só tem 1 página, o índice local é sempre 0
+    # Sempre índice 0, pois o PDF recebido aqui tem apenas 1 página
     page_idx_local = 0
     texto_pdf_real = ""
 
     try:
-        # --- Validação do PDF ---
         reader = PdfReader(io.BytesIO(pdf_bytes))
         total_pages = len(reader.pages)
         if total_pages == 0:
@@ -370,7 +357,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "texto_real": texto_pdf_real
             }
 
-        # --- Extrair imagem da página (INTEIRA) ---
+        # --- Extrair imagem da página (INTEIRA) usando índice 0 ---
         img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx_local)
         
         if img_bytes is None:
@@ -393,7 +380,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
 
         # --- Chamada ao Gemini ---
-        st.write(f"[DEBUG] Chamando Gemini para {name}, página {page_idx_original+1}")
+        st.write(f"[DEBUG] Chamando Gemini para {name}, pág {page_idx_original+1}")
         try:
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
             print(f"RESPOSTA IA ({name}): {dados}") 
@@ -414,10 +401,8 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         if not dados or not isinstance(dados, dict):
             dados = {"emitente": "", "numero_nota": "000", "cidade": ""}
 
-        # --- Armazenar no cache SOMENTE SE achou dados úteis ---
         tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
         
-        # Resultado Final
         resultado_final = {
             "status": "OK" if ok else "ERRO",
             "dados": dados,
@@ -429,7 +414,6 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             "texto_real": texto_pdf_real
         }
 
-        # Só salva no cache se tiver sucesso E dados
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         
@@ -535,7 +519,6 @@ if uploaded_files and process_btn:
 
     jobs = []
     
-    # --- Prompt Otimizado para OCR ---
     prompt = """
 Documento: NOTA FISCAL BRASILEIRA (NF-e / DANFE), PDF ESCANEADO (imagem).
 
@@ -614,7 +597,6 @@ Retorne APENAS um JSON válido com estas chaves exatas:
                     else:
                         css_class = "success-log"
 
-                    # CORREÇÃO PARA O DADOS FINAS
                     emitente_raw = dados.get("emitente", "") or f"REVISAR_{idx}"
                     numero_raw = dados.get("numero_nota", "") or "000"
                     cidade_raw = dados.get("cidade", "") or ""
@@ -802,7 +784,7 @@ if "resultados" in st.session_state:
                     }
                     st.session_state["resultados"].append(nm)
                     st.session_state["files_meta"][nn] = nm
-                    st.session_state["novos_nomes"][nn] = nn
+                    st.session_state["novos_nomes"][nn] = nm
                     st.success(f"Criado: {nn}")
             
             if c_b.button("🗑️ Remover Selecionadas (Do PDF atual)"):
