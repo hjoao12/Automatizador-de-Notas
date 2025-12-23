@@ -30,6 +30,26 @@ st.set_page_config(
     layout="wide"
 )
 load_dotenv()
+# --- COLE ISSO LOGO ABAIXO DE load_dotenv() ---
+
+# Inicialização segura do Supabase (Evita o NameError)
+try:
+    from supabase import create_client, Client
+    
+    @st.cache_resource
+    def init_supabase():
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_KEY")
+        if url and key:
+            return create_client(url, key)
+        return None
+    
+    supabase = init_supabase()
+except ImportError:
+    supabase = None
+except Exception as e:
+    print(f"Erro Supabase: {e}")
+    supabase = None
 
 # ======= CSS Corporativo Claro =======
 st.markdown("""
