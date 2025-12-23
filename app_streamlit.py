@@ -592,7 +592,7 @@ Retorne APENAS um JSON válido com estas chaves exatas:
     # -----------------------------------------------------------
     # Reduzi para 2 para respeitar o plano gratuito e funcionar com
     # a lógica de retentativa inteligente (sem estourar demais).
-    MAX_WORKERS = 2 
+    MAX_WORKERS = 4
     total_jobs = len(jobs) if jobs else 1
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
