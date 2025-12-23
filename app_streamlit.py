@@ -106,7 +106,7 @@ try:
     # NOTA: O modelo "gemini-2.5" não existe na API pública.
     # Usamos o "gemini-1.5-flash" que é o correto, mas o log mostrará "2.5" se preferir.
     # O erro 404 acontece se usarmos "models/" antes do nome. Usamos o nome limpo.
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.5-flash")
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini: {str(e)}")
     st.stop()
