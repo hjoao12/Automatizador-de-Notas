@@ -300,34 +300,61 @@ def calcular_delay(tentativa, error_msg):
 
 def processar_pagina_gemini(prompt, image_bytes):
     start_time = time.time()
-    try:
-        image = Image.open(io.BytesIO(image_bytes))
-        generation_config = genai.types.GenerationConfig(
-            temperature=0.1,
-            response_mime_type="application/json"
-        )
-        
-        response = model.generate_content(
-            [prompt, image],
-            generation_config=generation_config
-        )
-        
-        elapsed = time.time() - start_time
-        
-        if response.text:
-            try:
-                text = response.text.replace("```json", "").replace("```", "")
-                dados = json.loads(text)
-                return dados, True, elapsed, "Gemini 2.5" 
-            except json.JSONDecodeError:
-                print(f"\n[DEBUG] FALHA JSON: {response.text}\n") 
-                return {"error": "Falha ao decodificar JSON"}, False, elapsed, "Gemini 2.5"
-        else:
-            return {"error": "Resposta vazia da IA"}, False, elapsed, "Gemini 2.5"
+    
+    # Configuração de retentativas inteligentes
+    max_retries = 5  # Aumentamos para 5 tentativas
+    base_delay = 5   # Espera mínima inicial
+    
+    for tentativa in range(max_retries):
+        try:
+            image = Image.open(io.BytesIO(image_bytes))
+            generation_config = genai.types.GenerationConfig(
+                temperature=0.1,
+                response_mime_type="application/json"
+            )
+            
+            response = model.generate_content(
+                [prompt, image],
+                generation_config=generation_config
+            )
+            
+            elapsed = time.time() - start_time
+            
+            if response.text:
+                try:
+                    text = response.text.replace("```json", "").replace("```", "")
+                    dados = json.loads(text)
+                    return dados, True, elapsed, "Gemini 2.5" 
+                except json.JSONDecodeError:
+                    return {"error": "Falha ao decodificar JSON"}, False, elapsed, "Gemini 2.5"
+            else:
+                return {"error": "Resposta vazia da IA"}, False, elapsed, "Gemini 2.5"
 
-    except Exception as e:
-        elapsed = time.time() - start_time
-        return {"error": f"Erro API: {str(e)}"}, False, elapsed, "Gemini 2.5"
+        except Exception as e:
+            erro_str = str(e)
+            
+            # --- LÓGICA INTELIGENTE DE ESPERA ---
+            if "429" in erro_str or "Quota exceeded" in erro_str:
+                # 1. Tenta achar o tempo exato que o Google mandou esperar
+                match_seconds = re.search(r"retry_delay.*?\n?\s*seconds:\s*(\d+)", erro_str, re.DOTALL | re.IGNORECASE)
+                
+                wait_time = base_delay * (tentativa + 1) # Fallback padrão
+                
+                if match_seconds:
+                    exact_seconds = int(match_seconds.group(1))
+                    wait_time = exact_seconds + 2 # Espera o tempo pedido + 2s de segurança
+                    print(f"⏳ Cota cheia. O Google pediu para esperar {exact_seconds}s. Pausando por {wait_time}s...")
+                else:
+                    print(f"⚠️ Cota cheia (tempo indefinido). Pausando por {wait_time}s...")
+                
+                time.sleep(wait_time)
+                continue # Tenta de novo
+            
+            # Se for outro erro que não seja cota, desiste logo
+            elapsed = time.time() - start_time
+            return {"error": f"Erro API: {erro_str}"}, False, elapsed, "Gemini 2.5"
+            
+    return {"error": "Falha após múltiplas tentativas (Cota)"}, False, time.time() - start_time, "Gemini 2.5"
 
 def processar_pagina_worker(job_data, crop_ratio_override=None):
     """
@@ -560,7 +587,12 @@ Retorne APENAS um JSON válido com estas chaves exatas:
     progresso_text = st.empty()
     start_all = time.time()
     
-    MAX_WORKERS = 4
+    # -----------------------------------------------------------
+    # CONFIGURAÇÃO DE VELOCIDADE
+    # -----------------------------------------------------------
+    # Reduzi para 2 para respeitar o plano gratuito e funcionar com
+    # a lógica de retentativa inteligente (sem estourar demais).
+    MAX_WORKERS = 2 
     total_jobs = len(jobs) if jobs else 1
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
