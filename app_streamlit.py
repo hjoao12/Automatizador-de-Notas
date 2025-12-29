@@ -168,6 +168,29 @@ def sync_patterns_db(new_dict):
 if "db_patterns" not in st.session_state:
     st.session_state["db_patterns"] = {}
 
+# --- FUNÇÃO DE EXTRAÇÃO DE TEMPO DE RETRY (NOVA) ---
+def extrair_retry_after(erro_str):
+    """
+    Retorna segundos sugeridos pelo Gemini ou None.
+    Analisa strings como "retry after 32 seconds" ou "retry in 1 minute".
+    """
+    # padrão: "retry after 32 seconds" ou "retry_delay seconds: 32"
+    m = re.search(r"retry after (\d+)", erro_str.lower())
+    if m:
+        return int(m.group(1))
+
+    # padrão alternativo comum em logs JSON do google: "seconds: 30" próximo a retry
+    m2 = re.search(r"seconds:\s*(\d+)", erro_str.lower())
+    if m2 and "retry" in erro_str.lower():
+         return int(m2.group(1))
+
+    # padrão: "retry in 1 minute"
+    m3 = re.search(r"retry in (\d+) minute", erro_str.lower())
+    if m3:
+        return int(m3.group(1)) * 60
+
+    return None
+
 # --- FUNÇÃO DE OCR SEGURA ---
 def extrair_texto_ocr(img_bytes):
     if pytesseract is None:
@@ -328,14 +351,15 @@ def processar_pagina_gemini(prompt, image_bytes):
             
             # --- LÓGICA DE ESPERA INTELIGENTE (429) ---
             if "429" in erro_str or "Quota exceeded" in erro_str:
-                match_seconds = re.search(r"retry_delay.*?\n?\s*seconds:\s*(\d+)", erro_str, re.DOTALL | re.IGNORECASE)
+                # 1. Tenta extrair o tempo exato sugerido
+                sugerido = extrair_retry_after(erro_str)
                 
+                # 2. Define o fallback (Backoff Exponencial)
                 wait_time = base_delay * (tentativa + 1)
                 
-                if match_seconds:
-                    exact_seconds = int(match_seconds.group(1))
-                    wait_time = exact_seconds + 2 
-                    print(f"⏳ Cota cheia. Esperando {exact_seconds}s (+2s) conforme API...")
+                if sugerido:
+                    wait_time = sugerido + 2  # Adiciona buffer de segurança
+                    print(f"⏳ Cota cheia. Esperando {sugerido}s (+2s buffer) conforme API...")
                 else:
                     print(f"⚠️ Cota cheia. Esperando {wait_time}s (estimado)...")
                 
