@@ -22,7 +22,17 @@ from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =====================================================================
-# CONFIGURAÇÃO: TORNAR OCR OPCIONAL (CORREÇÃO DO ERRO)
+# 1️⃣ CORREÇÃO CRÍTICA: IMPORT DO PDF VIEWER
+# =====================================================================
+try:
+    from streamlit_pdf_viewer import pdf_viewer
+except ImportError:
+    # Fallback seguro caso a lib não esteja instalada (evita crash imediato)
+    st.error("Biblioteca 'streamlit_pdf_viewer' não encontrada. Instale com: pip install streamlit-pdf-viewer")
+    pdf_viewer = None
+
+# =====================================================================
+# CONFIGURAÇÃO: TORNAR OCR OPCIONAL E SEGURO
 # =====================================================================
 try:
     import pytesseract
@@ -91,8 +101,9 @@ class DocumentCache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
     
-    def get_cache_key(self, pdf_bytes, prompt):
-        content_hash = hashlib.md5(pdf_bytes).hexdigest()
+    def get_cache_key(self, content_bytes, prompt):
+        # 2️⃣ CORREÇÃO: Cache key baseada no CONTEÚDO (hash) e não no objeto
+        content_hash = hashlib.md5(content_bytes).hexdigest()
         prompt_hash = hashlib.md5(prompt.encode()).hexdigest()
         return f"{content_hash}_{prompt_hash}"
     
@@ -157,7 +168,7 @@ def sync_patterns_db(new_dict):
 if "db_patterns" not in st.session_state:
     st.session_state["db_patterns"] = {}
 
-# --- FUNÇÃO DE OCR SEGURA (Não falha se faltar pytesseract) ---
+# --- FUNÇÃO DE OCR SEGURA ---
 def extrair_texto_ocr(img_bytes):
     if pytesseract is None:
         return "" # Retorna vazio se a lib não estiver instalada
@@ -300,6 +311,11 @@ def processar_pagina_gemini(prompt, image_bytes):
             if response.text:
                 try:
                     text = response.text.replace("```json", "").replace("```", "")
+                    
+                    # 5️⃣ CORREÇÃO: Limpeza de JSON (vírgulas extras)
+                    text = re.sub(r",\s*}", "}", text)
+                    text = re.sub(r",\s*]", "]", text)
+                    
                     dados = json.loads(text)
                     return dados, True, elapsed, "Gemini 2.5" 
                 except json.JSONDecodeError:
@@ -312,20 +328,19 @@ def processar_pagina_gemini(prompt, image_bytes):
             
             # --- LÓGICA DE ESPERA INTELIGENTE (429) ---
             if "429" in erro_str or "Quota exceeded" in erro_str:
-                # Tenta extrair o tempo exato pedido pelo Google
                 match_seconds = re.search(r"retry_delay.*?\n?\s*seconds:\s*(\d+)", erro_str, re.DOTALL | re.IGNORECASE)
                 
                 wait_time = base_delay * (tentativa + 1)
                 
                 if match_seconds:
                     exact_seconds = int(match_seconds.group(1))
-                    wait_time = exact_seconds + 2 # +2s de margem de segurança
+                    wait_time = exact_seconds + 2 
                     print(f"⏳ Cota cheia. Esperando {exact_seconds}s (+2s) conforme API...")
                 else:
                     print(f"⚠️ Cota cheia. Esperando {wait_time}s (estimado)...")
                 
                 time.sleep(wait_time)
-                continue # Tenta de novo no loop
+                continue 
             
             elapsed = time.time() - start_time
             return {"error": f"Erro API: {erro_str}"}, False, elapsed, "Gemini 2.5"
@@ -343,7 +358,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
     # PDF fatiado = índice sempre 0
     page_idx_local = 0
     
-    # Limpeza preventiva de memória
+    # 7️⃣ CORREÇÃO: Limpeza preventiva apenas no início
     gc.collect()
 
     try:
@@ -362,6 +377,14 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "texto_real": ""
             }
 
+        # --- 2️⃣ CORREÇÃO: Cache key com PDF original (Estável) ---
+        cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
+        cached_result = document_cache.get(cache_key)
+        
+        # Se tem cache, nem gera a imagem (economia de CPU)
+        if cached_result and job_data.get("use_cache", True):
+            return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes}
+
         # --- Extrair imagem (INTEIRA) ---
         img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx_local)
         
@@ -378,17 +401,12 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "texto_real": ""
             }
 
-        # --- Tenta OCR (se disponível) ---
-        texto_pdf_real = extrair_texto_ocr(img_bytes)
-
-        # --- Cache ---
-        cache_key = document_cache.get_cache_key(img_bytes, prompt)
-        cached_result = document_cache.get(cache_key)
-        if cached_result and job_data.get("use_cache", True):
-             # Limpeza antes de retornar
-            del img_bytes
-            gc.collect()
-            return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
+        # --- 3️⃣ & 4️⃣ CORREÇÃO: OCR Condicional e Truncado ---
+        texto_pdf_real = ""
+        if pytesseract:
+            texto_pdf_real = extrair_texto_ocr(img_bytes)
+            if texto_pdf_real and len(texto_pdf_real) > 5000:
+                texto_pdf_real = texto_pdf_real[:5000] # Limita tamanho p/ regex
 
         # --- Chamada ao Gemini ---
         print(f"[DEBUG] Chamando Gemini para {name}, pág {page_idx_original+1}")
@@ -396,7 +414,6 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
             print(f"RESPOSTA IA ({name}): {dados}") 
         except Exception as e_gem:
-            # Limpeza em erro
             del img_bytes
             gc.collect()
             return {
@@ -417,6 +434,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
 
         tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
         
+        # Incluímos texto_real no cache para validação futura
         resultado_final = {
             "status": "OK" if ok else "ERRO",
             "dados": dados,
@@ -429,9 +447,9 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         }
 
         if ok and "error" not in dados and tem_dados:
-            document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
+            document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider, 'texto_real': texto_pdf_real})
         
-        # Limpeza de memória obrigatória
+        # 7️⃣ Limpeza de memória obrigatória
         del img_bytes
         gc.collect()
         
@@ -525,7 +543,6 @@ if clear_session:
     st.rerun()
 
 if uploaded_files and process_btn:
-    # CORREÇÃO 2: Removido document_cache.clear()
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
@@ -537,7 +554,6 @@ if uploaded_files and process_btn:
 
     jobs = []
     
-    # CORREÇÃO 6: Prompt otimizado
     prompt = """
 Documento: NOTA FISCAL BRASILEIRA (NF-e / DANFE), PDF ESCANEADO (imagem).
 
@@ -588,9 +604,10 @@ Retorne APENAS JSON válido:
     start_all = time.time()
     
     # -----------------------------------------------------------
-    # CONFIGURAÇÃO DE VELOCIDADE
+    # 6️⃣ CORREÇÃO: VELOCIDADE ADAPTATIVA (EVITA TRAVAMENTOS)
     # -----------------------------------------------------------
-    MAX_WORKERS = 2  
+    cpu_cores = os.cpu_count() or 2
+    MAX_WORKERS = min(2, cpu_cores) # Mantém seguro (2) em cloud
     total_jobs = len(jobs) if jobs else 1
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -611,6 +628,7 @@ Retorne APENAS JSON válido:
                     dados_iniciais = {"emitente": "", "numero_nota": "000", "cidade": "" }
                 else:
                     dados_iniciais = result["dados"]
+                    # Passamos o texto_real (que pode vir do cache ou do OCR)
                     dados = validar_e_corrigir_dados(dados_iniciais, result.get("texto_real", ""))
                     
                     if result["status"] == "CACHE":
@@ -633,7 +651,7 @@ Retorne APENAS JSON válido:
                     
                     numero = limpar_numero(numero_raw)
                     
-                    # CORREÇÃO 5: Chave de agrupamento segura
+                    # Chave de agrupamento segura
                     if numero == "0" or numero == "000":
                         emitente = f"REVISAR_{limpar_emitente(emitente_raw)}"
                         key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente, name)    
@@ -786,7 +804,10 @@ if "resultados" in st.session_state:
             st.rerun()
             
         with st.expander("👁️ Visualizar PDF", expanded=True):
-            pdf_viewer(str(session_folder/tgt), height=600)
+            if pdf_viewer:
+                pdf_viewer(str(session_folder/tgt), height=600)
+            else:
+                st.warning("Visualizador de PDF não disponível. Instale streamlit-pdf-viewer.")
             
         # Ações de Separar/Remover Páginas
         try:
