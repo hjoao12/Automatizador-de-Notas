@@ -13,7 +13,6 @@ import pickle
 import base64
 import gc
 import pandas as pd
-import pytesseract
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 import google.generativeai as genai
@@ -22,10 +21,13 @@ from PIL import Image
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# =====================================================================
+# CONFIGURAÇÃO: TORNAR OCR OPCIONAL (CORREÇÃO DO ERRO)
+# =====================================================================
 try:
     import pytesseract
 except ImportError:
-    pytesseract = none
+    pytesseract = None  # Se não estiver instalado, segue sem OCR
 
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
@@ -38,7 +40,7 @@ st.set_page_config(
 load_dotenv()
 
 # =====================================================================
-# CORREÇÃO 1: DIRETÓRIO TEMPORÁRIO GLOBAL (Evita NameError)
+# DIRETÓRIO TEMPORÁRIO GLOBAL
 # =====================================================================
 TEMP_FOLDER = Path("./temp")
 TEMP_FOLDER.mkdir(parents=True, exist_ok=True)
@@ -155,8 +157,10 @@ def sync_patterns_db(new_dict):
 if "db_patterns" not in st.session_state:
     st.session_state["db_patterns"] = {}
 
-# --- CORREÇÃO 4.2: Função auxiliar para OCR (Fallback) ---
+# --- FUNÇÃO DE OCR SEGURA (Não falha se faltar pytesseract) ---
 def extrair_texto_ocr(img_bytes):
+    if pytesseract is None:
+        return "" # Retorna vazio se a lib não estiver instalada
     try:
         img = Image.open(io.BytesIO(img_bytes))
         return pytesseract.image_to_string(img, lang="por")
@@ -374,26 +378,25 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "texto_real": ""
             }
 
-        # --- CORREÇÃO 4.3: Usar OCR para fallback e atribuir variável ---
+        # --- Tenta OCR (se disponível) ---
         texto_pdf_real = extrair_texto_ocr(img_bytes)
 
         # --- Cache ---
         cache_key = document_cache.get_cache_key(img_bytes, prompt)
         cached_result = document_cache.get(cache_key)
         if cached_result and job_data.get("use_cache", True):
-             # 7.1 Limpeza antes de retornar
+             # Limpeza antes de retornar
             del img_bytes
             gc.collect()
             return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
 
         # --- Chamada ao Gemini ---
-        # CORREÇÃO 3: st.write substituído por print (evita erro de thread)
         print(f"[DEBUG] Chamando Gemini para {name}, pág {page_idx_original+1}")
         try:
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
             print(f"RESPOSTA IA ({name}): {dados}") 
         except Exception as e_gem:
-            # 7.2 Limpeza em erro
+            # Limpeza em erro
             del img_bytes
             gc.collect()
             return {
@@ -428,7 +431,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         
-        # CORREÇÃO 7: Limpeza de memória obrigatória ao final do processo
+        # Limpeza de memória obrigatória
         del img_bytes
         gc.collect()
         
@@ -522,7 +525,7 @@ if clear_session:
     st.rerun()
 
 if uploaded_files and process_btn:
-    # CORREÇÃO 2: Removido document_cache.clear() para não apagar o cache a cada clique
+    # CORREÇÃO 2: Removido document_cache.clear()
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
@@ -534,7 +537,7 @@ if uploaded_files and process_btn:
 
     jobs = []
     
-    # CORREÇÃO 6: Prompt otimizado para visão computacional
+    # CORREÇÃO 6: Prompt otimizado
     prompt = """
 Documento: NOTA FISCAL BRASILEIRA (NF-e / DANFE), PDF ESCANEADO (imagem).
 
@@ -585,9 +588,9 @@ Retorne APENAS JSON válido:
     start_all = time.time()
     
     # -----------------------------------------------------------
-    # CONFIGURAÇÃO DE VELOCIDADE (SEGURA)
+    # CONFIGURAÇÃO DE VELOCIDADE
     # -----------------------------------------------------------
-    MAX_WORKERS = 2  # Usar 2 é o limite seguro. 4 ESTOURA MEMÓRIA.
+    MAX_WORKERS = 2  
     total_jobs = len(jobs) if jobs else 1
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -630,7 +633,7 @@ Retorne APENAS JSON válido:
                     
                     numero = limpar_numero(numero_raw)
                     
-                    # CORREÇÃO 5: Chave de agrupamento segura (incluindo 'name')
+                    # CORREÇÃO 5: Chave de agrupamento segura
                     if numero == "0" or numero == "000":
                         emitente = f"REVISAR_{limpar_emitente(emitente_raw)}"
                         key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente, name)    
@@ -654,7 +657,6 @@ Retorne APENAS JSON válido:
     resultados = []
     files_meta = {}
     
-    # Atualização do loop de descompactação da chave (numero, emitente, name)
     for (numero, emitente, _), pages_list in agrupados_dados.items():
         pages_list.sort(key=lambda x: (x['file_origin'], x['page_idx']))
         writer = PdfWriter()
