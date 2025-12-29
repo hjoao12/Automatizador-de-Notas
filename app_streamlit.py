@@ -244,7 +244,11 @@ def validar_e_corrigir_dados(dados, texto_pdf_real=""):
 
 def extrair_pagina_inteira(pdf_bytes, page_idx, dpi=200):
     try:
+        # ✅ Correção: Agora acessamos a página específica do PDF completo
+        # first_page e last_page usam índice baseado em 1, por isso page_idx+1
         images = convert_from_bytes(pdf_bytes, dpi=dpi, first_page=page_idx+1, last_page=page_idx+1)
+        if not images: return None
+        
         img = images[0]
         if img.width > 2000:
             ratio = 2000 / float(img.width)
@@ -300,25 +304,40 @@ def processar_pagina_gemini(prompt, image_bytes):
     return {"error": "Falha após múltiplas tentativas (Cota)"}, False, time.time() - start_time, "Gemini 2.5"
 
 def processar_pagina_worker(job_data, crop_ratio_override=None):
-    pdf_bytes = job_data["bytes"]
+    pdf_bytes = job_data["bytes"] # ✅ Agora recebe o PDF completo
     prompt = job_data["prompt"]
     name = job_data["name"]
     page_idx_original = job_data["page_idx"]
-    page_idx_local = 0
+    
+    # ✅ CORREÇÃO CRÍTICA 1: Usar o índice real da página
+    page_idx_local = page_idx_original 
+    
     gc.collect()
 
     try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        total_pages = len(reader.pages)
-        if total_pages == 0: return {"status": "ERRO", "dados": {"emitente": "", "numero_nota": "000", "cidade": ""}, "tempo": 0, "provider": "", "name": name, "page_idx": page_idx_original, "error_msg": "PDF vazio", "pdf_bytes": pdf_bytes, "texto_real": ""}
+        # Validação simples (apenas para garantir que bytes são válidos)
+        # reader = PdfReader(io.BytesIO(pdf_bytes)) # Opcional, custoso em loop, removido para performance
 
-        cache_key = document_cache.get_cache_key(pdf_bytes, prompt)
+        # ✅ CORREÇÃO CRÍTICA 2: Cache Key inclui o número da página
+        cache_key = document_cache.get_cache_key(pdf_bytes, f"{prompt}_page_{page_idx_original}")
+        
         cached_result = document_cache.get(cache_key)
         if cached_result and job_data.get("use_cache", True):
-            return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes}
+            # Retornamos o PDF completo nos bytes, mas precisamos saber que isso pode usar muita RAM se cachear o binário inteiro
+            # O ideal seria não retornar pdf_bytes no cache se ele for muito grande, mas mantendo a lógica atual:
+            return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": None} 
+            # Nota: Retornei pdf_bytes como None no cache hit para economizar RAM, o main loop deve lidar com isso se precisar re-fatiar.
+            # AJUSTE: O main loop precisa do PDF de uma página só para salvar.
+            # Vamos extrair a página única aqui para retornar ao loop principal.
+            
+            # Recriando o PDF de página única para o retorno (necessário para o writer final)
+            b = io.BytesIO(); w = PdfWriter(); r = PdfReader(io.BytesIO(pdf_bytes)); w.add_page(r.pages[page_idx_original]); w.write(b)
+            single_page_bytes = b.getvalue()
+            return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": single_page_bytes}
 
+        # Extração da imagem
         img_bytes = extrair_pagina_inteira(pdf_bytes, page_idx_local)
-        if img_bytes is None: return {"status": "ERRO", "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""}, "tempo": 0, "provider": "System", "name": name, "page_idx": page_idx_original, "error_msg": "Falha IMG", "pdf_bytes": pdf_bytes, "texto_real": ""}
+        if img_bytes is None: return {"status": "ERRO", "dados": {"emitente": "ERRO_IMG", "numero_nota": "000", "cidade": ""}, "tempo": 0, "provider": "System", "name": name, "page_idx": page_idx_original, "error_msg": "Falha IMG", "pdf_bytes": None, "texto_real": ""}
 
         texto_pdf_real = ""
         if pytesseract:
@@ -330,14 +349,26 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
         except Exception as e_gem:
             del img_bytes; gc.collect()
-            return {"status": "ERRO", "dados": {"emitente": "", "numero_nota": "000", "cidade": ""}, "tempo": 0, "provider": "", "name": name, "page_idx": page_idx_original, "error_msg": f"Erro Gemini: {e_gem}", "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
+            return {"status": "ERRO", "dados": {"emitente": "", "numero_nota": "000", "cidade": ""}, "tempo": 0, "provider": "", "name": name, "page_idx": page_idx_original, "error_msg": f"Erro Gemini: {e_gem}", "pdf_bytes": None, "texto_real": texto_pdf_real}
 
         if not dados or not isinstance(dados, dict): dados = {"emitente": "", "numero_nota": "000", "cidade": ""}
         tem_dados = dados.get("emitente") != "EMITENTE_DESCONHECIDO" and dados.get("numero_nota") != "000"
         
-        resultado_final = {"status": "OK" if ok else "ERRO", "dados": dados, "tempo": tempo, "provider": provider, "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
+        # ✅ CORREÇÃO 4: Lógica de Status
+        if ok and tem_dados:
+            status_final = "OK"
+        elif ok:
+            status_final = "REVISAR"
+        else:
+            status_final = "ERRO"
 
-        if ok and "error" not in dados and tem_dados:
+        # Criar PDF de página única para retorno (para salvar individualmente)
+        b = io.BytesIO(); w = PdfWriter(); r = PdfReader(io.BytesIO(pdf_bytes)); w.add_page(r.pages[page_idx_original]); w.write(b)
+        single_page_bytes = b.getvalue()
+
+        resultado_final = {"status": status_final, "dados": dados, "tempo": tempo, "provider": provider, "name": name, "page_idx": page_idx_original, "pdf_bytes": single_page_bytes, "texto_real": texto_pdf_real}
+
+        if status_final in ["OK", "REVISAR"] and "error" not in dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider, 'texto_real': texto_pdf_real})
         
         del img_bytes; gc.collect()
@@ -345,7 +376,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
 
     except Exception as e_outer:
         print(f"ERRO CRITICO WORKER: {e_outer}")
-        return {"status": "ERRO", "dados": {"emitente": "", "numero_nota": "000", "cidade": ""}, "tempo": 0, "provider": "", "name": name, "page_idx": page_idx_original if 'page_idx_original' in locals() else 0, "error_msg": f"Erro crítico: {e_outer}", "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real if 'texto_pdf_real' in locals() else ""}
+        return {"status": "ERRO", "dados": {"emitente": "", "numero_nota": "000", "cidade": ""}, "tempo": 0, "provider": "", "name": name, "page_idx": page_idx_original if 'page_idx_original' in locals() else 0, "error_msg": f"Erro crítico: {e_outer}", "pdf_bytes": None, "texto_real": texto_pdf_real if 'texto_pdf_real' in locals() else ""}
 
 # =====================================================================
 # UI & MAIN FLOW
@@ -383,7 +414,7 @@ def criar_dashboard_analitico():
     with col1: st.metric("📁 Arquivos Gerados", len(resultados))
     with col2: st.metric("📄 Páginas Processadas", sum(r.get('pages', 1) for r in resultados))
     with col3: st.metric("✅ Sucessos", len([log for log in logs if log[2] == "OK"]))
-    with col4: st.metric("⚠️ Cache/Erros", len([log for log in logs if log[2] != "OK"]))
+    with col4: st.metric("⚠️ Revisão/Erros", len([log for log in logs if log[2] != "OK"]))
 
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.markdown("### 📎 Enviar PDFs")
@@ -415,7 +446,7 @@ if uploaded_files and process_btn:
     log_placeholder.markdown("".join(real_time_logs_html), unsafe_allow_html=True)
     # -------------------------------------------------------
 
-    with st.spinner("⏳ Processando documentos... (Isso pode demorar um pouco)"):
+    with st.spinner("⏳ Processando documentos..."):
         for f in uploaded_files:
             try: arquivos.append({"name": f.name, "bytes": f.read()})
             except: st.warning(f"Erro ao ler {f.name}, ignorado.")
@@ -427,12 +458,21 @@ NÃO utilize texto selecionável do PDF.
 Extraia: "emitente", "numero_nota", "cidade".
 Retorne APENAS JSON válido: { "emitente": "", "numero_nota": "", "cidade": "" }"""
 
+        # ✅ AJUSTE NO LOOP PRINCIPAL:
+        # Não fatiamos mais o PDF aqui. Enviamos o PDF inteiro e o índice.
+        # Isso economiza tempo de "PdfWriter" no loop e permite que o worker saiba o contexto real.
         for a in arquivos:
             try:
                 reader = PdfReader(io.BytesIO(a["bytes"]))
-                for idx, page in enumerate(reader.pages):
-                    b = io.BytesIO(); w = PdfWriter(); w.add_page(page); w.write(b)
-                    jobs.append({"bytes": b.getvalue(), "prompt": prompt, "name": a["name"], "page_idx": idx, "use_cache": st.session_state.get("use_cache", True)})
+                total_pages = len(reader.pages)
+                for idx in range(total_pages):
+                    jobs.append({
+                        "bytes": a["bytes"], # Passa o blob original completo
+                        "prompt": prompt, 
+                        "name": a["name"], 
+                        "page_idx": idx, 
+                        "use_cache": st.session_state.get("use_cache", True)
+                    })
             except Exception as e: st.error(f"Erro ao ler {a['name']}: {e}")
 
         agrupados_dados = {}
@@ -441,8 +481,8 @@ Retorne APENAS JSON válido: { "emitente": "", "numero_nota": "", "cidade": "" }
         progress_bar = st.progress(0.0)
         start_all = time.time()
         
-        cpu_cores = os.cpu_count() or 2
-        MAX_WORKERS = min(2, cpu_cores)
+        # ✅ CORREÇÃO 3: MAX_WORKERS = 1 para Free Tier
+        MAX_WORKERS = 1 
         total_jobs = len(jobs) if jobs else 1
         
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -454,7 +494,9 @@ Retorne APENAS JSON válido: { "emitente": "", "numero_nota": "", "cidade": "" }
                     result = future.result()
                     name = result["name"]; idx = result["page_idx"]; page_label = f"{name} (pág {idx+1})"
                     
-                    if result["status"] == "ERRO":
+                    status = result["status"]
+                    
+                    if status == "ERRO":
                         msg_erro = result.get("error_msg") or "Erro desconhecido"
                         log_info = f"FALHA: {msg_erro}"; css_class = "error-log"
                         dados_iniciais = {"emitente": "", "numero_nota": "000", "cidade": "" }
@@ -463,7 +505,11 @@ Retorne APENAS JSON válido: { "emitente": "", "numero_nota": "", "cidade": "" }
                         dados = validar_e_corrigir_dados(dados_iniciais, result.get("texto_real", ""))
                         
                         log_info = f"{dados.get('numero_nota')} | {dados.get('emitente')[:20]}"
-                        css_class = "warning-log" if dados.get('numero_nota') == "000" else "success-log"
+                        
+                        # ✅ CSS baseado no novo status REVISAR/OK
+                        if status == "REVISAR": css_class = "warning-log"
+                        elif status == "OK": css_class = "success-log"
+                        else: css_class = "info-log" # Cache ou outro
 
                         emitente_raw = dados.get("emitente", "") or f"REVISAR_{idx}"
                         numero_raw = dados.get("numero_nota", "") or "000"
@@ -477,13 +523,14 @@ Retorne APENAS JSON válido: { "emitente": "", "numero_nota": "", "cidade": "" }
                             nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
                             emitente = limpar_emitente(nome_map)
                             key = (numero, emitente, name)
+                        
+                        if result.get("pdf_bytes"): # Só adiciona se tiver o PDF da página
+                            agrupados_dados.setdefault(key, []).append({"page_idx": idx, "pdf_bytes": result["pdf_bytes"], "file_origin": name})
 
-                        agrupados_dados.setdefault(key, []).append({"page_idx": idx, "pdf_bytes": result["pdf_bytes"], "file_origin": name})
-
-                    processed_logs.append((page_label, result["tempo"], result["status"], log_info, result["provider"]))
+                    processed_logs.append((page_label, result["tempo"], status, log_info, result["provider"]))
                     
                     # --- ATUALIZA LOG EM TEMPO REAL ---
-                    new_line = f"<div class='{css_class}'>📝 {page_label}: {log_info}</div>"
+                    new_line = f"<div class='{css_class}'>📝 {page_label} [{status}]: {log_info}</div>"
                     real_time_logs_html.append(new_line)
                     log_placeholder.markdown("".join(real_time_logs_html[-20:]), unsafe_allow_html=True)
 
