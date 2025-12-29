@@ -33,7 +33,7 @@ st.set_page_config(
 load_dotenv()
 
 # =====================================================================
-# CORREÇÃO 1: DIRETÓRIO TEMPORÁRIO GLOBAL
+# CORREÇÃO 1: DIRETÓRIO TEMPORÁRIO GLOBAL (Evita NameError)
 # =====================================================================
 TEMP_FOLDER = Path("./temp")
 TEMP_FOLDER.mkdir(parents=True, exist_ok=True)
@@ -150,7 +150,7 @@ def sync_patterns_db(new_dict):
 if "db_patterns" not in st.session_state:
     st.session_state["db_patterns"] = {}
 
-# --- CORREÇÃO 4.2: Função auxiliar para OCR ---
+# --- CORREÇÃO 4.2: Função auxiliar para OCR (Fallback) ---
 def extrair_texto_ocr(img_bytes):
     try:
         img = Image.open(io.BytesIO(img_bytes))
@@ -369,26 +369,26 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "texto_real": ""
             }
 
-        # --- CORREÇÃO 4.3: Usar OCR para fallback ---
+        # --- CORREÇÃO 4.3: Usar OCR para fallback e atribuir variável ---
         texto_pdf_real = extrair_texto_ocr(img_bytes)
 
         # --- Cache ---
         cache_key = document_cache.get_cache_key(img_bytes, prompt)
         cached_result = document_cache.get(cache_key)
         if cached_result and job_data.get("use_cache", True):
-            # Limpeza antes de retornar cache
+             # 7.1 Limpeza antes de retornar
             del img_bytes
             gc.collect()
             return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
 
         # --- Chamada ao Gemini ---
-        # CORREÇÃO 3: st.write removido (não seguro em thread), usar print
+        # CORREÇÃO 3: st.write substituído por print (evita erro de thread)
         print(f"[DEBUG] Chamando Gemini para {name}, pág {page_idx_original+1}")
         try:
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
             print(f"RESPOSTA IA ({name}): {dados}") 
         except Exception as e_gem:
-            # Limpeza em caso de erro
+            # 7.2 Limpeza em erro
             del img_bytes
             gc.collect()
             return {
@@ -423,10 +423,10 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         
-        # CORREÇÃO 7: Limpeza de memória obrigatória
+        # CORREÇÃO 7: Limpeza de memória obrigatória ao final do processo
         del img_bytes
         gc.collect()
-
+        
         return resultado_final
 
     except Exception as e_outer:
@@ -517,7 +517,7 @@ if clear_session:
     st.rerun()
 
 if uploaded_files and process_btn:
-    # CORREÇÃO 2: REMOVIDA A LINHA document_cache.clear()
+    # CORREÇÃO 2: Removido document_cache.clear() para não apagar o cache a cada clique
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
@@ -529,7 +529,7 @@ if uploaded_files and process_btn:
 
     jobs = []
     
-    # CORREÇÃO 6: PROMPT ATUALIZADO
+    # CORREÇÃO 6: Prompt otimizado para visão computacional
     prompt = """
 Documento: NOTA FISCAL BRASILEIRA (NF-e / DANFE), PDF ESCANEADO (imagem).
 
@@ -625,7 +625,7 @@ Retorne APENAS JSON válido:
                     
                     numero = limpar_numero(numero_raw)
                     
-                    # CORREÇÃO 5: Chave de agrupamento segura (inclui 'name')
+                    # CORREÇÃO 5: Chave de agrupamento segura (incluindo 'name')
                     if numero == "0" or numero == "000":
                         emitente = f"REVISAR_{limpar_emitente(emitente_raw)}"
                         key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente, name)    
@@ -649,7 +649,7 @@ Retorne APENAS JSON válido:
     resultados = []
     files_meta = {}
     
-    # Atualizar o loop para descompactar a chave nova (com 'name')
+    # Atualização do loop de descompactação da chave (numero, emitente, name)
     for (numero, emitente, _), pages_list in agrupados_dados.items():
         pages_list.sort(key=lambda x: (x['file_origin'], x['page_idx']))
         writer = PdfWriter()
@@ -777,6 +777,9 @@ if "resultados" in st.session_state:
         if c2.button("❌", help="Fechar"):
             st.session_state.pop("_manage_target")
             st.rerun()
+            
+        with st.expander("👁️ Visualizar PDF", expanded=True):
+            pdf_viewer(str(session_folder/tgt), height=600)
             
         # Ações de Separar/Remover Páginas
         try:
