@@ -83,9 +83,9 @@ h1, h2, h3, h4 { color: #0f4c81; }
 div.stButton > button { background-color: #0f4c81; color: white; border-radius: 8px; border: none; font-weight: 500; }
 div.stButton > button:hover { background-color: #0b3a5a; }
 .stProgress > div > div > div > div { background-color: #28a745 !important; }
-.success-log { color: #155724; background-color: #d4edda; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; }
-.warning-log { color: #856404; background-color: #fff3cd; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; }
-.error-log { color: #721c24; background-color: #f8d7da; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; }
+.success-log { color: #155724; background-color: #d4edda; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; margin-bottom: 2px; }
+.warning-log { color: #856404; background-color: #fff3cd; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; margin-bottom: 2px; }
+.error-log { color: #721c24; background-color: #f8d7da; padding: 6px 10px; border-radius: 6px; font-size: 0.9rem; margin-bottom: 2px; }
 .card { background: #fff; padding: 15px; border-radius:8px; box-shadow: 0 4px 12px rgba(15,76,129,0.08); margin-bottom:15px; }
 .manage-panel { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #0f4c81; margin: 10px 0; }
 </style>
@@ -624,7 +624,14 @@ Retorne APENAS JSON válido:
     processed_logs = []
     processed_count = 0
     progress_bar = st.progress(0.0)
-    progresso_text = st.empty()
+    
+    # -----------------------------------------------------------
+    # NOVO: BOTÃO DISCRETO (EXPANDER) PARA LOGS
+    # -----------------------------------------------------------
+    with st.expander("👁️ Ver Logs de Processamento em Tempo Real", expanded=False):
+        log_placeholder = st.empty()
+    real_time_logs_html = []
+    
     start_all = time.time()
     
     # -----------------------------------------------------------
@@ -689,7 +696,12 @@ Retorne APENAS JSON válido:
                     })
 
                 processed_logs.append((page_label, result["tempo"], result["status"], log_info, result["provider"]))
-                progresso_text.markdown(f"<span class='{css_class}'>📝 {page_label}: {log_info}</span>", unsafe_allow_html=True)
+                
+                # --- ATUALIZAÇÃO DO LOG NO EXPANDER ---
+                new_line = f"<div class='{css_class}'>📝 {page_label}: {log_info}</div>"
+                real_time_logs_html.append(new_line)
+                # Mostra apenas as últimas 20 linhas para não travar
+                log_placeholder.markdown("".join(real_time_logs_html[-20:]), unsafe_allow_html=True)
 
             except Exception as e:
                 st.error(f"Erro crítico no loop: {e}")
