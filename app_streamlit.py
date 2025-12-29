@@ -22,6 +22,11 @@ from PIL import Image
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+try:
+    import pytesseract
+except ImportError:
+    pytesseract = none
+
 # =====================================================================
 # CONFIGURAÇÃO INICIAL
 # =====================================================================
