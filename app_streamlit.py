@@ -13,7 +13,7 @@ import pickle
 import base64
 import gc
 import pandas as pd
-import pytesseract  # <--- 4.1 IMPORT ADICIONADO
+import pytesseract # <--- CORREÇÃO 4.1: Import necessário
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 import google.generativeai as genai
@@ -33,7 +33,7 @@ st.set_page_config(
 load_dotenv()
 
 # =====================================================================
-# 1️⃣ DIRETÓRIO TEMPORÁRIO GLOBAL (CORREÇÃO CRÍTICA)
+# CORREÇÃO 1: DIRETÓRIO TEMPORÁRIO GLOBAL
 # =====================================================================
 TEMP_FOLDER = Path("./temp")
 TEMP_FOLDER.mkdir(parents=True, exist_ok=True)
@@ -136,7 +136,7 @@ try:
 
 except Exception as e:
     st.error(f"❌ Erro ao configurar Gemini ({model_name_target}): {str(e)}")
-    # Não paramos o app aqui para permitir que a interface carregue
+    # Não paramos o app aqui para permitir que a interface carregue, mas vai falhar ao rodar.
 
 # =====================================================================
 # FUNÇÕES AUXILIARES
@@ -150,11 +150,10 @@ def sync_patterns_db(new_dict):
 if "db_patterns" not in st.session_state:
     st.session_state["db_patterns"] = {}
 
-# 4.2 FUNÇÃO DE OCR BÁSICO (CORREÇÃO)
+# --- CORREÇÃO 4.2: Função auxiliar para OCR ---
 def extrair_texto_ocr(img_bytes):
     try:
         img = Image.open(io.BytesIO(img_bytes))
-        # Requer tesseract instalado no sistema. Se não tiver, retorna vazio sem quebrar.
         return pytesseract.image_to_string(img, lang="por")
     except:
         return ""
@@ -304,19 +303,20 @@ def processar_pagina_gemini(prompt, image_bytes):
             
             # --- LÓGICA DE ESPERA INTELIGENTE (429) ---
             if "429" in erro_str or "Quota exceeded" in erro_str:
+                # Tenta extrair o tempo exato pedido pelo Google
                 match_seconds = re.search(r"retry_delay.*?\n?\s*seconds:\s*(\d+)", erro_str, re.DOTALL | re.IGNORECASE)
                 
                 wait_time = base_delay * (tentativa + 1)
                 
                 if match_seconds:
                     exact_seconds = int(match_seconds.group(1))
-                    wait_time = exact_seconds + 2 
+                    wait_time = exact_seconds + 2 # +2s de margem de segurança
                     print(f"⏳ Cota cheia. Esperando {exact_seconds}s (+2s) conforme API...")
                 else:
                     print(f"⚠️ Cota cheia. Esperando {wait_time}s (estimado)...")
                 
                 time.sleep(wait_time)
-                continue 
+                continue # Tenta de novo no loop
             
             elapsed = time.time() - start_time
             return {"error": f"Erro API: {erro_str}"}, False, elapsed, "Gemini 2.5"
@@ -369,25 +369,26 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
                 "texto_real": ""
             }
 
-        # --- 4.3 EXTRAIR TEXTO OCR (FALLBACK) ---
+        # --- CORREÇÃO 4.3: Usar OCR para fallback ---
         texto_pdf_real = extrair_texto_ocr(img_bytes)
 
         # --- Cache ---
         cache_key = document_cache.get_cache_key(img_bytes, prompt)
         cached_result = document_cache.get(cache_key)
         if cached_result and job_data.get("use_cache", True):
-            # Limpa memória antes de retornar
+            # Limpeza antes de retornar cache
             del img_bytes
             gc.collect()
             return {**cached_result, "status": "CACHE", "name": name, "page_idx": page_idx_original, "pdf_bytes": pdf_bytes, "texto_real": texto_pdf_real}
 
-        # --- 3️⃣ Chamada ao Gemini (CORREÇÃO DE THREAD-SAFETY) ---
-        print(f"[DEBUG] Gemini -> {name}, pág {page_idx_original+1}")
-        
+        # --- Chamada ao Gemini ---
+        # CORREÇÃO 3: st.write removido (não seguro em thread), usar print
+        print(f"[DEBUG] Chamando Gemini para {name}, pág {page_idx_original+1}")
         try:
             dados, ok, tempo, provider = processar_pagina_gemini(prompt, img_bytes)
             print(f"RESPOSTA IA ({name}): {dados}") 
         except Exception as e_gem:
+            # Limpeza em caso de erro
             del img_bytes
             gc.collect()
             return {
@@ -422,7 +423,7 @@ def processar_pagina_worker(job_data, crop_ratio_override=None):
         if ok and "error" not in dados and tem_dados:
             document_cache.set(cache_key, {'dados': dados, 'tempo': tempo, 'provider': provider})
         
-        # 7️⃣ PROTEÇÃO DE MEMÓRIA (CORREÇÃO)
+        # CORREÇÃO 7: Limpeza de memória obrigatória
         del img_bytes
         gc.collect()
 
@@ -516,7 +517,7 @@ if clear_session:
     st.rerun()
 
 if uploaded_files and process_btn:
-    # 2️⃣ REMOVIDO document_cache.clear() (BUG LÓGICO RESOLVIDO)
+    # CORREÇÃO 2: REMOVIDA A LINHA document_cache.clear()
     session_id = str(uuid.uuid4())
     session_folder = TEMP_FOLDER / session_id
     os.makedirs(session_folder, exist_ok=True)
@@ -528,7 +529,7 @@ if uploaded_files and process_btn:
 
     jobs = []
     
-    # 6️⃣ PROMPT MELHORADO
+    # CORREÇÃO 6: PROMPT ATUALIZADO
     prompt = """
 Documento: NOTA FISCAL BRASILEIRA (NF-e / DANFE), PDF ESCANEADO (imagem).
 
@@ -624,14 +625,14 @@ Retorne APENAS JSON válido:
                     
                     numero = limpar_numero(numero_raw)
                     
-                    # 5️⃣ AGRUPAMENTO SEGURO (MUDANÇA DE CHAVE)
+                    # CORREÇÃO 5: Chave de agrupamento segura (inclui 'name')
                     if numero == "0" or numero == "000":
                         emitente = f"REVISAR_{limpar_emitente(emitente_raw)}"
                         key = (f"000_REV_{idx}_{uuid.uuid4().hex[:4]}", emitente, name)    
                     else:
                         nome_map = substituir_nome_emitente(emitente_raw, cidade_raw)
                         emitente = limpar_emitente(nome_map)
-                        key = (numero, emitente, name) # Adicionado 'name' para evitar fusão indevida
+                        key = (numero, emitente, name)
 
                     agrupados_dados.setdefault(key, []).append({
                         "page_idx": idx, "pdf_bytes": result["pdf_bytes"], "file_origin": name
@@ -648,7 +649,7 @@ Retorne APENAS JSON válido:
     resultados = []
     files_meta = {}
     
-    # Atualização do Loop para Descompactar a nova chave (numero, emitente, nome_arquivo)
+    # Atualizar o loop para descompactar a chave nova (com 'name')
     for (numero, emitente, _), pages_list in agrupados_dados.items():
         pages_list.sort(key=lambda x: (x['file_origin'], x['page_idx']))
         writer = PdfWriter()
