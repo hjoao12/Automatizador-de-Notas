@@ -13,7 +13,7 @@ import pickle
 import base64
 import gc
 import pandas as pd
-import pytesseract # <--- CORREÇÃO 4.1: Import necessário
+import pytesseract
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 import google.generativeai as genai
