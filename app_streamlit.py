@@ -313,8 +313,8 @@ def processar_pagina_gemini(prompt, image_bytes):
 
     start_time = time.time()
     
-    max_retries = 5
-    base_delay = 5
+    # AJUSTE: Aumentado para 10 tentativas para suportar backoff mais longo
+    max_retries = 10
     
     for tentativa in range(max_retries):
         try:
@@ -354,14 +354,14 @@ def processar_pagina_gemini(prompt, image_bytes):
                 # 1. Tenta extrair o tempo exato sugerido
                 sugerido = extrair_retry_after(erro_str)
                 
-                # 2. Define o fallback (Backoff Exponencial)
-                wait_time = base_delay * (tentativa + 1)
-                
                 if sugerido:
-                    wait_time = sugerido + 2  # Adiciona buffer de segurança
-                    print(f"⏳ Cota cheia. Esperando {sugerido}s (+2s buffer) conforme API...")
+                    # Se a API mandou o tempo, obedecemos + 1s de segurança
+                    wait_time = sugerido + 1
+                    print(f"⏳ Cota cheia. Google pediu {sugerido}s. Aguardando {wait_time}s...")
                 else:
-                    print(f"⚠️ Cota cheia. Esperando {wait_time}s (estimado)...")
+                    # 2. Se não mandou, aí sim usamos exponencial (5s, 10s, 20s, 40s...)
+                    wait_time = 5 * (2 ** tentativa)
+                    print(f"⚠️ Cota cheia (sem tempo definido). Exponencial: {wait_time}s...")
                 
                 time.sleep(wait_time)
                 continue 
